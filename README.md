@@ -1,3 +1,9 @@
+## MOD
+
+This is a modified version of InternEvo. The original version is tagged as [deeplinkext_base](https://github.com/DeepLink-org/InternEvo/tree/deeplinkext_base).
+
+This branch is aimed to run InternEvo on DeepLink's infrastructure, with the help of [DeepLinkExt](https://github.com/DeepLink-org/DeepLinkExt).
+
 # InternEvo
 
 <div align="center">

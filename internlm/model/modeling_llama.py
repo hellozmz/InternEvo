@@ -36,8 +36,8 @@ from internlm.utils.logger import get_logger
 from internlm.utils.registry import MODEL_INITIALIZER
 
 try:
-    from flash_attn import flash_attn_varlen_kvpacked_func
-    from flash_attn.flash_attn_interface import FlashAttnVarlenKVPackedFunc
+    # from flash_attn import flash_attn_varlen_kvpacked_func
+    # from flash_attn.flash_attn_interface import FlashAttnVarlenKVPackedFunc
     from flash_attn.modules.embedding import ParallelGPT2Embeddings
     from flash_attn.modules.mha import (
         CrossAttention,
@@ -47,7 +47,7 @@ try:
         _update_kv_cache,
     )
     from flash_attn.modules.mlp import ParallelFusedMLP
-    from flash_attn.ops.layer_norm import dropout_add_layer_norm
+    # from flash_attn.ops.layer_norm import dropout_add_layer_norm
 except ImportError:
     pass
 
@@ -169,7 +169,7 @@ class MHA(nn.Module):
         self.inner_cross_attn_softmax_scale = softmax_scale
         self.inner_cross_attn_dropout = dropout
 
-        self.attn = flash_attn_varlen_kvpacked_func
+        self.attn = self.inner_cross_attn
         if self.tp_mode == "isp":
             self.attn = DistributedAttention(self.attn, sequence_process_group=sequence_process_group)
 
@@ -439,25 +439,19 @@ class MHA(nn.Module):
                     context = self.attn(
                         q=q,
                         kv=kv,
-                        cu_seqlens_q=kwargs["cu_seqlens"],
+                        cu_seqlens=kwargs["cu_seqlens"],
                         cu_seqlens_k=kwargs["cu_seqlens"],
-                        max_seqlen_q=kwargs["max_seqlen"],
+                        max_seqlen=kwargs["max_seqlen"],
                         max_seqlen_k=kwargs["max_seqlen"],
-                        dropout_p=self.inner_cross_attn_dropout,
-                        softmax_scale=self.inner_cross_attn_softmax_scale,
-                        causal=self.inner_cross_attn_causal,
                     ).to(self.dtype)
             else:
                 context = self.attn(
                     q=q,
                     kv=kv,
-                    cu_seqlens_q=kwargs["cu_seqlens"],
+                    cu_seqlens=kwargs["cu_seqlens"],
                     cu_seqlens_k=kwargs["cu_seqlens"],
-                    max_seqlen_q=kwargs["max_seqlen"],
+                    max_seqlen=kwargs["max_seqlen"],
                     max_seqlen_k=kwargs["max_seqlen"],
-                    dropout_p=self.inner_cross_attn_dropout,
-                    softmax_scale=self.inner_cross_attn_softmax_scale,
-                    causal=self.inner_cross_attn_causal,
                 )
         else:
             raise RuntimeError("Not support this right now")
