@@ -5,7 +5,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from flash_attn import flash_attn_varlen_kvpacked_func
+# from flash_attn import flash_attn_varlen_kvpacked_func
 from flash_attn.modules.embedding import ParallelGPT2Embeddings
 from flash_attn.modules.mha import (
     CrossAttention,
@@ -15,7 +15,7 @@ from flash_attn.modules.mha import (
     _update_kv_cache,
 )
 from flash_attn.modules.mlp import ParallelFusedMLP
-from flash_attn.ops.layer_norm import dropout_add_layer_norm
+# from flash_attn.ops.layer_norm import dropout_add_layer_norm
 from torch import nn
 
 from internlm.core.context import ParallelMode
