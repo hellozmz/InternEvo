@@ -149,8 +149,8 @@ model = dict(
     norm_type="rmsnorm",
     layer_norm_epsilon=1e-5,
     num_kv_attention_heads=NUM_KV_ATTENTION_HEAD,
-    ## ! # use_flash_attn=False,
-    use_flash_attn=True,
+    ## ! # use_flash_attn=True,
+    use_flash_attn=False,
 )
 
 """
