@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 import internlm
+import deeplink_ext.patch_internlm
 from internlm.checkpoint import CheckpointManager
 from internlm.core.context import ParallelMode
 from internlm.core.context import global_context as gpc
