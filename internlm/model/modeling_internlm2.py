@@ -5,6 +5,20 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+# <<<<<<< HEAD
+# from flash_attn import flash_attn_varlen_kvpacked_func
+from flash_attn.modules.embedding import ParallelGPT2Embeddings
+from flash_attn.modules.mha import (
+    CrossAttention,
+    FlashCrossAttention,
+    FlashSelfAttention,
+    SelfAttention,
+    _update_kv_cache,
+)
+from flash_attn.modules.mlp import ParallelFusedMLP
+# from flash_attn.ops.layer_norm import dropout_add_layer_norm
+# =======
+# >>>>>>> 97796271f590e405173a9f4d3a9c825f5e8fd01c
 from torch import nn
 
 from internlm.core.context import ParallelMode

@@ -9,6 +9,7 @@ from functools import partial
 import torch
 import torch.distributed as dist
 
+import deeplink_ext.patch_internlm
 import internlm
 from internlm.checkpoint import CheckpointManager
 from internlm.core.context import ParallelMode
@@ -111,7 +112,11 @@ def main(args):
         config_lines = f.readlines()
 
     # initialize loss function
-    criterion = FlashGPTLMLoss(parallel_output=gpc.config.model.parallel_output, label_smoothing=label_smoothing)
+    # <<<<<<< HEAD
+    criterion = FlashGPTLMLoss(parallel_output=False, label_smoothing=label_smoothing)
+    # =======
+    # criterion = FlashGPTLMLoss(parallel_output=gpc.config.model.parallel_output, label_smoothing=label_smoothing)
+    # >>>>>>> 97796271f590e405173a9f4d3a9c825f5e8fd01c
 
     # initialize the train and validation data loader
     train_dl, dataset_types = build_train_loader_with_data_type()

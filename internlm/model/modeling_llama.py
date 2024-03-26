@@ -39,6 +39,25 @@ from internlm.utils.common import filter_kwargs
 from internlm.utils.logger import get_logger
 from internlm.utils.registry import MODEL_INITIALIZER
 
+# <<<<<<< HEAD
+try:
+    # from flash_attn import flash_attn_varlen_kvpacked_func
+    # from flash_attn.flash_attn_interface import FlashAttnVarlenKVPackedFunc
+    from flash_attn.modules.embedding import ParallelGPT2Embeddings
+    from flash_attn.modules.mha import (
+        CrossAttention,
+        FlashCrossAttention,
+        FlashSelfAttention,
+        SelfAttention,
+        _update_kv_cache,
+    )
+    from flash_attn.modules.mlp import ParallelFusedMLP
+    # from flash_attn.ops.layer_norm import dropout_add_layer_norm
+except ImportError:
+    pass
+
+# =======
+# >>>>>>> 97796271f590e405173a9f4d3a9c825f5e8fd01c
 MODEL_TYPE = "LLAMA2"
 
 logger = get_logger(__file__)
@@ -161,7 +180,11 @@ class MHA(nn.Module):
         self.inner_cross_attn_softmax_scale = softmax_scale
         self.inner_cross_attn_dropout = dropout
 
-        self.attn = flash_attn_varlen_kvpacked_func if use_flash_attn else SelfAttention
+        # <<<<<<< HEAD
+        self.attn = self.inner_cross_attn
+        # =======
+        # self.attn = flash_attn_varlen_kvpacked_func if use_flash_attn else SelfAttention
+        # >>>>>>> 97796271f590e405173a9f4d3a9c825f5e8fd01c
         if self.tp_mode == "isp":
             self.attn = DistributedAttention(self.attn, sequence_process_group=sequence_process_group)
 
@@ -434,25 +457,19 @@ class MHA(nn.Module):
                     context = self.attn(
                         q=q,
                         kv=kv,
-                        cu_seqlens_q=kwargs["cu_seqlens"],
+                        cu_seqlens=kwargs["cu_seqlens"],
                         cu_seqlens_k=kwargs["cu_seqlens"],
-                        max_seqlen_q=kwargs["max_seqlen"],
+                        max_seqlen=kwargs["max_seqlen"],
                         max_seqlen_k=kwargs["max_seqlen"],
-                        dropout_p=self.inner_cross_attn_dropout,
-                        softmax_scale=self.inner_cross_attn_softmax_scale,
-                        causal=self.inner_cross_attn_causal,
                     ).to(self.dtype)
             else:
                 context = self.attn(
                     q=q,
                     kv=kv,
-                    cu_seqlens_q=kwargs["cu_seqlens"],
+                    cu_seqlens=kwargs["cu_seqlens"],
                     cu_seqlens_k=kwargs["cu_seqlens"],
-                    max_seqlen_q=kwargs["max_seqlen"],
+                    max_seqlen=kwargs["max_seqlen"],
                     max_seqlen_k=kwargs["max_seqlen"],
-                    dropout_p=self.inner_cross_attn_dropout,
-                    softmax_scale=self.inner_cross_attn_softmax_scale,
-                    causal=self.inner_cross_attn_causal,
                 )
         else:
             raise RuntimeError("Not support this right now")
