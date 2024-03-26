@@ -425,7 +425,7 @@ class PackedFlashInternLm1D(nn.Module):
         return hidden_states
 
 
-def _build_generic_model_1d(num_layers, num_chunks, device=torch.device("cuda"), **kwargs):
+def _build_generic_model_1d(num_layers, num_chunks, device="cuda", **kwargs):
     """
     build generic model 1d
 
