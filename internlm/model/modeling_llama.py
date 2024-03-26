@@ -1,4 +1,3 @@
-# Copyright (c) InternLM. All rights reserved.
 import math
 from typing import Optional
 
@@ -16,25 +15,31 @@ from internlm.initialize.initialize_tensor import (
     scaled_init_method_uniform,
     uniform_,
 )
-from internlm.model.embedding import Embedding1D, RotaryEmbedding
-from internlm.model.linear import (
+from internlm.model.modules.embedding import Embedding1D, RotaryEmbedding
+from internlm.model.modules.mlp import get_mlp_cls
+from internlm.model.modules.multi_head_attention import (
+    CrossAttention,
+    DistributedAttention,
+    SelfAttention,
+    _update_kv_cache,
+)
+from internlm.model.ops.linear import (
     RewardModelLinear,
     ScaleColumnParallelLinear,
     get_linear_cls,
-    get_mlp_cls,
 )
-from internlm.model.multi_head_attention import DistributedAttention
 from internlm.model.utils import (
     gather_forward_split_backward,
     split_forward_gather_backward,
     try_import_RMSNorm,
 )
+from internlm.solver.activation_checkpoint import activation_checkpoint
 from internlm.solver.pipeline_utils import partition_uniform
-from internlm.utils.checkpoint import activation_checkpoint
 from internlm.utils.common import filter_kwargs
 from internlm.utils.logger import get_logger
 from internlm.utils.registry import MODEL_INITIALIZER
 
+# <<<<<<< HEAD
 try:
     # from flash_attn import flash_attn_varlen_kvpacked_func
     # from flash_attn.flash_attn_interface import FlashAttnVarlenKVPackedFunc
@@ -51,6 +56,8 @@ try:
 except ImportError:
     pass
 
+# =======
+# >>>>>>> 97796271f590e405173a9f4d3a9c825f5e8fd01c
 MODEL_TYPE = "LLAMA2"
 
 logger = get_logger(__file__)
@@ -158,6 +165,10 @@ class MHA(nn.Module):
             **factory_kwargs,
         )
 
+        if use_flash_attn:
+            from flash_attn import flash_attn_varlen_kvpacked_func
+            from flash_attn.modules.mha import FlashCrossAttention, FlashSelfAttention
+
         inner_attn_cls = FlashSelfAttention if use_flash_attn else SelfAttention
         inner_cross_attn_cls = FlashCrossAttention if use_flash_attn else CrossAttention
         self.inner_attn = inner_attn_cls(causal=causal, softmax_scale=softmax_scale, attention_dropout=dropout)
@@ -169,7 +180,11 @@ class MHA(nn.Module):
         self.inner_cross_attn_softmax_scale = softmax_scale
         self.inner_cross_attn_dropout = dropout
 
+        # <<<<<<< HEAD
         self.attn = self.inner_cross_attn
+        # =======
+        # self.attn = flash_attn_varlen_kvpacked_func if use_flash_attn else SelfAttention
+        # >>>>>>> 97796271f590e405173a9f4d3a9c825f5e8fd01c
         if self.tp_mode == "isp":
             self.attn = DistributedAttention(self.attn, sequence_process_group=sequence_process_group)
 
@@ -300,6 +315,8 @@ class MHA(nn.Module):
 
             if hasattr(inference_params, "attention_mask") and inference_params.attention_mask is not None:
                 assert self.use_flash_attn is True
+                from flash_attn.flash_attn_interface import FlashAttnVarlenKVPackedFunc
+
                 if inference_params.sequence_len_offset == 0:  # First entrance, attnmask (bs*seqlen*seqlen)
                     attn_mask = inference_params.attention_mask[:, None, ...]
                     attn_mask = torch.logical_or(
@@ -320,6 +337,7 @@ class MHA(nn.Module):
                     total_kv = kv.masked_select(attn_mask4flsh.view(bsz, -1, 1, 1, 1)).view(
                         -1, kv.shape[-3], kv.shape[-2], kv.shape[-1]
                     )
+
                     if self.dtype is torch.float32:
                         if total_q.dtype not in [torch.float16, torch.bfloat16]:
                             total_q = total_q.to(torch.bfloat16)
@@ -566,12 +584,14 @@ class PackedFlashLlamaLayer1D(nn.Module):
         else:
             self.attention_norm = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
             self.ffn_norm = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
-        if self.fused_dropout_add_ln:
+        if self.fused_dropout_add_ln and self.use_flash_attn:
+            from flash_attn.ops.layer_norm import dropout_add_layer_norm
+
             assert dropout_add_layer_norm is not None, "dropout_add_ln is not installed"
             assert isinstance(self.attention_norm, nn.LayerNorm) and isinstance(self.dropout1, nn.Dropout)
 
         sequence_parallel = gpc.config.parallel.get("sequence_parallel", False)
-        if use_swiglu:
+        if use_swiglu or not gpc.config.model.use_flash_attn:
             mlp_cls = get_mlp_cls(self.tp_mode)
             self.feed_forward = mlp_cls(
                 hidden_size,
@@ -583,6 +603,8 @@ class PackedFlashLlamaLayer1D(nn.Module):
                 dtype=dtype,
             )
         else:
+            from flash_attn.modules.mlp import ParallelFusedMLP
+
             self.feed_forward = ParallelFusedMLP(
                 hidden_size,
                 int(hidden_size * mlp_ratio),
@@ -768,7 +790,6 @@ class PackedFlashLlama1D(nn.Module):
         ffn_other_init_std (float): std used to init ffn_other weight. 0.02 by default,
         out_head_init_std (float): std used to init output lmhead weight. 0.02 by default,
         init_type (str): Initialization type. Use uniform or normal. "normal" by default,
-        extra_pred_tokens (int): The number of extra output head for multi-token-prediction. 0 by default.
         rope_base (int): The value of `base` for rotary position embeddings. 10000 by default.
     """
 
@@ -810,7 +831,6 @@ class PackedFlashLlama1D(nn.Module):
         ffn_other_init_std: float = 0.02,
         out_head_init_std: float = 0.02,
         init_type: str = "normal",
-        extra_pred_tokens: int = 0,
         rope_base: int = 10000,
     ):
         super().__init__()
@@ -832,9 +852,11 @@ class PackedFlashLlama1D(nn.Module):
             head_cls = ScaleColumnParallelLinear
 
         if first:
-            if embed_split_hidden:
+            if embed_split_hidden or not gpc.config.model.use_flash_attn:
                 self.tok_embeddings = Embedding1D(num_embeddings=vocab_size, embedding_dim=hidden_size)
             else:
+                from flash_attn.modules.embedding import ParallelGPT2Embeddings
+
                 self.tok_embeddings = ParallelGPT2Embeddings(
                     embed_dim=hidden_size,
                     vocab_size=vocab_size,
@@ -911,29 +933,6 @@ class PackedFlashLlama1D(nn.Module):
                 else:
                     uniform_(std=out_head_init_std)(param)
 
-            if extra_pred_tokens > 0:
-                self.extra_pred_tokens = extra_pred_tokens
-                assert not is_reward, "extra_pred_tokens > 0 means using multi token prediction, not implement for RLHF"
-                self.extra_outputs = nn.ModuleList(
-                    [
-                        head_cls(
-                            in_features=hidden_size,
-                            out_features=vocab_size,
-                            process_group=gpc.get_group(ParallelMode.TENSOR),
-                            bias=False,
-                            device=device,
-                            dtype=dtype,
-                            weight_scale=embed_grad_scale,
-                        )
-                        for _ in range(self.extra_pred_tokens)
-                    ]
-                )
-                for _, param in self.extra_outputs.named_parameters():
-                    if init_type == "normal":
-                        normal_(std=out_head_init_std)(param)
-                    else:
-                        uniform_(std=out_head_init_std)(param)
-
         self.parallel_output = parallel_output
 
     def forward(self, hidden_states=None, cu_seqlens=None, input_ids=None, indexes=None, inference_params=None):
@@ -975,10 +974,7 @@ class PackedFlashLlama1D(nn.Module):
 
         if hasattr(self, "norm"):
             hidden_states = self.norm(hidden_states.float())
-        if hasattr(self, "extra_pred_tokens") and self.extra_pred_tokens > 0:
-            extra_hidden_states_list = [self.extra_outputs[i](hidden_states) for i in range(self.extra_pred_tokens)]
-        else:
-            extra_hidden_states_list = None
+
         if hasattr(self, "output"):
             # Evaluation
             if gpc.is_evaluating is True:
@@ -986,16 +982,8 @@ class PackedFlashLlama1D(nn.Module):
             else:  # Training
                 hidden_states = self.output(hidden_states, gather_dim=0, tp_mode=self.tp_mode)
 
-        if not self.parallel_output:
+        if not self.parallel_output and gpc.is_pipeline_last_stage():
             hidden_states = gather_forward_split_backward(hidden_states, ParallelMode.TENSOR, dim=-1)
-            if extra_hidden_states_list is not None:
-                extra_hidden_states_list = [
-                    gather_forward_split_backward(extra_hidden_states, ParallelMode.TENSOR, dim=-1)
-                    for extra_hidden_states in extra_hidden_states_list
-                ]
-
-        if extra_hidden_states_list is not None:
-            return (hidden_states, extra_hidden_states_list)
 
         return hidden_states
 
@@ -1077,7 +1065,6 @@ def build_model_with_cfg(
     ffn_other_init_std: float = 0.02,
     out_head_init_std: float = 0.02,
     init_type: str = "normal",
-    extra_pred_tokens: int = 0,
     rope_base: int = 10000,
 ):
     """
@@ -1117,7 +1104,6 @@ def build_model_with_cfg(
         ffn_other_init_std (float): std used to init ffn_other weight. 0.02 by default,
         out_head_init_std (float): std used to init output lmhead weight. 0.02 by default,
         init_type (str): Initialization type. Use uniform or normal. "normal" by default,
-        extra_pred_tokens (int): The number of extra output head for multi-token-prediction. 0 by default.
         rope_base (int): The value of `base` for rotary position embeddings. 10000 by default.
     """
     if deepnorm:
@@ -1154,7 +1140,6 @@ def build_model_with_cfg(
         ffn_other_init_std=ffn_other_init_std,
         out_head_init_std=out_head_init_std,
         init_type=init_type,
-        extra_pred_tokens=extra_pred_tokens,
         rope_base=rope_base,
     )
 

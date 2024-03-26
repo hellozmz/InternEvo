@@ -11,7 +11,7 @@ from internlm.core.context.parallel_context import Config
 from internlm.data.utils import unpack_data
 from internlm.initialize.launch import args_sanity_check
 
-config = Config(
+config_7B = Config(
     dict(
         parallel=dict(
             zero1=dict(size=-1),
@@ -20,6 +20,7 @@ config = Config(
             weight=dict(size=1, overlap=True, memory_pool=True),
         ),
         data=dict(
+            type="tokenized",
             seq_len=2048,
             micro_num=4,
             micro_bsz=2,

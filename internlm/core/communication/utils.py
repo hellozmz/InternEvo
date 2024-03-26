@@ -5,15 +5,14 @@ from typing import Dict, List, Tuple, Union
 
 import torch
 import torch.distributed as dist
-from flash_attn.modules.embedding import ParallelGPT2Embeddings
 from torch import nn
 
 from internlm.core.communication.isp import ISPCommunicator
 from internlm.core.context import ParallelMode
 from internlm.core.context import global_context as gpc
 from internlm.core.naive_amp import NaiveAMPModel
-from internlm.model.embedding import Embedding1D
-from internlm.model.linear import BaseScaleColumnParallelLinear
+from internlm.model.modules.embedding import Embedding1D
+from internlm.model.ops.linear import BaseScaleColumnParallelLinear
 from internlm.utils.common import get_current_device
 
 TensorShape = Union[torch.Size, List[int], Tuple[int]]
@@ -217,12 +216,17 @@ class ParamAsyncBcastHandler:
             # NOTE: Although the layernorm layer does not have explicit processing,
             # both ISPCommunicator and ParamAsyncBcastHandler handle transformer blocks as granularity,
             # so everything is fine.
-            if isp_communicator is None or isinstance(
-                block, (Embedding1D, ParallelGPT2Embeddings, BaseScaleColumnParallelLinear)
-            ):
+
+            embedding_head_cls = (Embedding1D, BaseScaleColumnParallelLinear)
+            if gpc.config.model.use_flash_attn:
+                from flash_attn.modules.embedding import ParallelGPT2Embeddings
+
+                embedding_head_cls = (Embedding1D, ParallelGPT2Embeddings, BaseScaleColumnParallelLinear)
+
+            if isp_communicator is None or isinstance(block, embedding_head_cls):
                 block.register_forward_pre_hook(_pre_forward_hook)
-            else:
-                isp_communicator.register_prerequisite_for_forward_prefetch_hooks(_pre_forward_hook)
+        if isp_communicator:
+            isp_communicator.register_prerequisite_for_forward_prefetch_hooks(_pre_forward_hook)
 
     def get_rank_by_param(self, param) -> int:
         return self._param_to_rank[param]

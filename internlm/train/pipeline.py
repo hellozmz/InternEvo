@@ -2,16 +2,10 @@
 # -*- encoding: utf-8 -*-
 
 import functools
-import os
-import pickle
 import time
-from functools import partial
 from typing import Callable, Iterable, List, Optional, Union
 
 import torch
-import torch.distributed as dist
-from flash_attn.modules.embedding import ParallelGPT2Embeddings
-from flash_attn.modules.mlp import ParallelFusedMLP
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.fully_sharded_data_parallel import (
@@ -19,7 +13,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import (
     ShardingStrategy,
 )
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import DataLoader
 
 from internlm.core.communication.isp import (
     ISPCommModelConfig,
@@ -39,42 +33,32 @@ from internlm.core.context import global_context as gpc
 from internlm.core.context.random import set_mode
 from internlm.core.naive_amp import NaiveAMPModel, set_fp32_attr_to_module
 from internlm.core.trainer import TrainState
-from internlm.data.batch_sampler import StaticBatchSampler, get_dpsampler_dataloader
-from internlm.data.collaters import jsonl_ds_collate_fn, packed_collate_fn
-from internlm.data.dataset import get_dataset_dict
-from internlm.data.dummy_dataset import RandomDataset
-from internlm.data.packed_dataset import (
-    PackedDataset,
-    PackedDatasetWithoutCuSeqlen,
-    get_packed_dataset_without_short_length,
+from internlm.data.utils import unpack_data
+from internlm.model.metrics import SchedulerMetricHook
+from internlm.model.modules.embedding import Embedding1D
+from internlm.model.modules.mlp import FeedForward
+from internlm.model.modules.multi_head_attention import MHA
+from internlm.model.moe.megablock.mlp import (
+    MegaBlockFeedForward,
+    MegaBlockGroupedFeedForward,
 )
-from internlm.data.utils import get_dataset_type_ids_map, unpack_data
-from internlm.model.embedding import Embedding1D
-from internlm.model.linear import (
+from internlm.model.moe.moe import MoE
+from internlm.model.ops.linear import (
     BaseScaleColumnParallelLinear,
-    ColumnParallelLinear,
-    FeedForward,
+    ColumnParallelLinearTorch,
     ISPLinear,
     RewardModelLinear,
-    RowParallelLinear,
+    RowParallelLinearTorch,
     ScaleColumnParallelLinear,
 )
-from internlm.model.metrics import SchedulerMetricHook
-from internlm.model.moe import MoE
-from internlm.model.multi_head_attention import MHA
 from internlm.model.utils import is_moe_param, try_import_RMSNorm
 from internlm.monitor import send_heartbeat, set_env_var
 from internlm.monitor.monitor import monitor_manager as mm
-from internlm.solver.beta2_scheduler import Beta2Scheduler
-from internlm.solver.lr_scheduler import FineTuneCosineAnnealingWarmupLR
 from internlm.solver.optimizer import FSDPadaptOptimizer, HybridZeroOptimizer
+from internlm.solver.schedulers.beta2_scheduler import Beta2Scheduler
+from internlm.solver.schedulers.lr_scheduler import FineTuneCosineAnnealingWarmupLR
 from internlm.train.utils import create_param_groups
-from internlm.utils.common import (
-    DummyProfile,
-    SchedulerHook,
-    get_current_device,
-    launch_time,
-)
+from internlm.utils.common import DummyProfile, SchedulerHook, get_current_device
 from internlm.utils.logger import get_logger
 from internlm.utils.megatron_timers import megatron_timer as timer
 from internlm.utils.parallel import (
@@ -84,7 +68,6 @@ from internlm.utils.parallel import (
     is_tensor_zero_parallel_parameter,
     is_using_isp,
     is_weight_zero_parallel_parameter,
-    set_model_params_layer_name,
     sync_model_param,
     sync_model_replica_param_group,
 )
@@ -117,7 +100,12 @@ def set_parallel_attr_for_param_groups(model: Union[nn.Module, nn.ModuleList]):
                 setattr(param, IS_REPLICA_ZERO_PARALLEL, True)
 
         # embedding and head
-        if isinstance(module, (Embedding1D, ParallelGPT2Embeddings, BaseScaleColumnParallelLinear)):
+        if gpc.config.model.use_flash_attn:
+            from flash_attn.modules.embedding import ParallelGPT2Embeddings
+
+        if isinstance(module, (Embedding1D, BaseScaleColumnParallelLinear)) or (
+            gpc.config.model.use_flash_attn and isinstance(module, ParallelGPT2Embeddings)
+        ):
             for param in module.parameters():
                 if gpc.is_initialized(ParallelMode.TENSOR) and is_using_isp():
                     setattr(param, IS_TENSOR_DATA_PARALLEL, True)
@@ -125,7 +113,10 @@ def set_parallel_attr_for_param_groups(model: Union[nn.Module, nn.ModuleList]):
                     setattr(param, IS_TENSOR_ZERO_PARALLEL, True)
 
         # for linear module
-        if isinstance(module, (ColumnParallelLinear, RowParallelLinear)):
+        if isinstance(
+            module,
+            (ColumnParallelLinearTorch, RowParallelLinearTorch, MegaBlockFeedForward, MegaBlockGroupedFeedForward),
+        ):
             for param in module.parameters():
                 if gpc.is_initialized(ParallelMode.EXPERT_DATA) and is_moe_param(param):
                     # module should be MoE experts's linear
@@ -217,7 +208,10 @@ def initialize_model(pre_process_func: Optional[Callable] = None, post_process_f
 
 
 def wrap_FSDP_model(model: Union[nn.Module, nn.ModuleList]):
-    if gpc.config.parallel.zero1.fsdp:
+    if gpc.config.parallel.zero1.fsdp and gpc.config.model.use_flash_attn:
+        from flash_attn.modules.embedding import ParallelGPT2Embeddings
+        from flash_attn.modules.mlp import ParallelFusedMLP
+
         # set wrap_policy for fsdp wrap
         transformer_wrap_policy = functools.partial(
             transformer_auto_wrap_policy,
@@ -289,42 +283,57 @@ def initialize_optimizer(model: Union[nn.Module, nn.ModuleList], isp_communicato
     Returns:
         A tuple of (optimizer, beta2_scheduler, lr_scheduler).
     """
-    grad_profiling_config = gpc.config.get("grad_profiling", {})
-    if (
-        grad_profiling_config.get("grad_norm_profiling", False)
-        or grad_profiling_config.get("zero_grad_profiling", False)
-        or grad_profiling_config.get("vocab_grad_norm_profiling", False)
-    ):
-        # set the layer name as an attribute of the model parameters
-        set_model_params_layer_name(model)
-
-    if gpc.config.hybrid_zero_optimizer.overlap_sync_param:
-        param_bcast_sync_handler = ParamAsyncBcastHandler(ParallelMode.ZERO1, model, isp_communicator)
-    else:
-        param_bcast_sync_handler = None
 
     adam_cfg = gpc.config.adam
+    zero_cfg = gpc.config.hybrid_zero_optimizer
+    grad_scal_cfg = gpc.config.grad_scaler
+
     params = create_param_groups(model, adam_cfg.weight_decay)
+    adam_extra_kwargs = {}
+    # set fused=True to avoid nan grad norm when model size is larger and use_fp32_norm=True
+    if torch.__version__ >= "2.1.0":
+        adam_extra_kwargs["fused"] = True
+
     naive_optimizer = torch.optim.AdamW(
         params=params,
         lr=adam_cfg.lr,
         betas=(adam_cfg.adam_beta1, adam_cfg.adam_beta2),
         eps=adam_cfg.adam_eps,
+        **adam_extra_kwargs,
     )
+
+    if (
+        zero_cfg.overlap_sync_grad
+        and gpc.is_using_parallel_mode(ParallelMode.PIPELINE)
+        and gpc.is_pipeline_first_stage() is False
+    ):
+        # When pipeline parallelism is enabled, we prefer to only enable optimizer
+        # gradient communication overlap in the first stage, to avoid amplifying
+        # the communication overhead stage by stage in cases where the optimizer
+        # communication overhead is greater than the compute overhead.
+        # For pipeline stages except the first, even if overlap is not enabled,
+        # their gradient synchronization overhead can be well hidden by
+        # the inherent bubbles of pipeline parallelism.
+        zero_cfg.overlap_sync_grad = False
+
+    if zero_cfg.overlap_sync_param:
+        param_bcast_sync_handler = ParamAsyncBcastHandler(ParallelMode.ZERO1, model, isp_communicator)
+    else:
+        param_bcast_sync_handler = None
 
     if not gpc.config.parallel.zero1.fsdp:
         optimizer = HybridZeroOptimizer(
             naive_optimizer,
-            grad_scal_cfg=gpc.config.grad_scaler,
-            zero_cfg=gpc.config.hybrid_zero_optimizer,
+            grad_scal_cfg=grad_scal_cfg,
+            zero_cfg=zero_cfg,
             param_bcast_sync_handler=param_bcast_sync_handler,
             isp_communicator=isp_communicator,
         )
     else:
         optimizer = FSDPadaptOptimizer(
             naive_optimizer,
-            grad_scal_cfg=gpc.config.grad_scaler,
-            zero_cfg=gpc.config.hybrid_zero_optimizer,
+            grad_scal_cfg=grad_scal_cfg,
+            zero_cfg=zero_cfg,
         )
 
     beta2_scheduler = Beta2Scheduler(optimizer=naive_optimizer, **gpc.config.beta2_scheduler)
@@ -356,135 +365,6 @@ def get_scheduler_hooks(metric, zero_optim, isp_communicator) -> List[SchedulerH
     return scheduler_hooks
 
 
-@llm_timeout(func_name="get_train_data_loader")
-def get_train_data_loader(num_worker: int = 0, dataset_generate_func: Optional[Callable] = None):
-    """
-    Generate and return the training data loader.
-
-    Args:
-        num_worker (:class:`int`): number of subprocesses used for dataloader.
-        dataset_generate_func (:class:`Callable`, optional): generate function for dataset.
-
-    Returns:
-        A tuple of (train_dl, dataset_types).
-    """
-
-    # Get the dataset types
-    data_cfg = gpc.config.data
-    train_folder = data_cfg.train_folder
-    dataset_types = list(get_dataset_type_ids_map(train_folder).keys())
-
-    if dataset_generate_func is not None:
-        train_ds, train_sampler, train_collate_fn = dataset_generate_func()
-    else:
-        if train_folder is None:
-            dataset_types = ["en", "cn", "code"]
-            train_ds = RandomDataset(num_samples=1000000, max_len=data_cfg.seq_len)
-            if data_cfg.pack_sample_into_one:
-                train_ds = PackedDatasetWithoutCuSeqlen(
-                    train_ds, max_length_per_sample=data_cfg.seq_len, packed_length=data_cfg.packed_length
-                )
-            else:
-                train_ds = PackedDataset(
-                    train_ds, max_length_per_sample=data_cfg.seq_len, packed_length=data_cfg.packed_length
-                )
-        else:
-            train_ds = get_packed_dataset_without_short_length(
-                folder=data_cfg.train_folder,
-                packed_length=data_cfg.packed_length,
-                max_length_per_sample=data_cfg.seq_len,
-                show_progress=dist.get_rank() == 0,
-                min_length=data_cfg.min_length,
-                min_length_dict=data_cfg.get("min_length_dict", {}),
-                pack_into_one_sample=data_cfg.pack_sample_into_one,
-            )
-        train_sampler = StaticBatchSampler(
-            train_ds.datasets if isinstance(train_ds, ConcatDataset) else [train_ds],
-            batch_size=data_cfg.micro_num,
-            rampup_batch_size=data_cfg.rampup_batch_size,
-            micro_bsz=data_cfg.micro_bsz,
-            seed=1024,
-            drop_last=True,
-            data_rank=gpc.get_local_rank(ParallelMode.DATA),
-            data_world_size=gpc.get_world_size(ParallelMode.DATA),
-        )
-        train_collate_fn = partial(packed_collate_fn, packed_length=data_cfg.packed_length)
-
-    # Create the training data loader
-    train_dl = DataLoader(
-        dataset=train_ds,
-        batch_sampler=train_sampler,
-        num_workers=num_worker,
-        pin_memory=True,
-        collate_fn=train_collate_fn,
-        persistent_workers=num_worker > 0,
-    )
-
-    return train_dl, dataset_types
-
-
-@llm_timeout(func_name="get_validation_data_loader")
-def get_validation_data_loader(
-    num_worker: int = 0, dataset_generate_func: Callable = None, val_collate_fn=None, dataloader_func=None
-):
-    """Generate and return the validation data loader."""
-
-    data_cfg = gpc.config.data
-
-    if not data_cfg.valid_folder:
-        val_ds = RandomDataset(num_samples=gpc.get_world_size(ParallelMode.DATA) * 500, max_len=data_cfg.seq_len)
-    else:
-        if dataset_generate_func is not None:
-            assert val_collate_fn and dataloader_func is not None
-            val_ds = dataset_generate_func()
-        else:
-            val_ds = get_dataset_dict(folder=data_cfg.valid_folder, split="")
-
-    if not isinstance(val_ds, dict):
-        val_ds = {"val": val_ds}
-
-    if val_collate_fn is None or not data_cfg.valid_folder:
-        val_collate_fn = partial(jsonl_ds_collate_fn, max_length_per_sample=data_cfg.seq_len)
-
-    val_dls = {}
-    for val_name, ds in val_ds.items():
-        if dataloader_func and data_cfg.valid_folder is not None:
-            val_dls[val_name] = dataloader_func(dataset=ds, collate_fn=val_collate_fn)
-            if gpc.is_rank_for_log():
-                logger.info(
-                    f"load validation dataset {val_name} with valid batch size {str(data_cfg.valid_micro_num)} and "
-                    f"{ds.size} Byte samples."
-                )
-        else:
-            # making the batch_size of validate larger can speed up the evaluation, but it should not be too large,
-            # otherwise too much data may be dropped
-            batch_size = min(
-                data_cfg.valid_micro_num * data_cfg.micro_bsz, len(ds) // gpc.get_world_size(ParallelMode.DATA)
-            )
-            batch_size = batch_size // data_cfg.micro_bsz * data_cfg.micro_bsz
-
-            if batch_size == 0 and gpc.is_rank_for_log():
-                logger.info(f"skip validate {val_name}.")
-                continue
-
-            val_dls[val_name] = get_dpsampler_dataloader(
-                ds,
-                shuffle=False,
-                num_workers=num_worker,
-                batch_size=batch_size,
-                collate_fn=val_collate_fn,
-                drop_last=True,
-            )  # drop_last=True, otherwise it may cause problems in the last batch
-
-            if gpc.is_rank_for_log():
-                logger.info(
-                    f"load validation dataset {val_name} with valid batch size {str(batch_size)} and "
-                    f"samples {str(len(val_dls[val_name]))}."
-                )
-
-    return val_dls
-
-
 @llm_timeout(func_name="load_new_batch")
 def load_new_batch(train_dl: DataLoader, train_iter: Iterable, train_state: TrainState):
     """
@@ -508,6 +388,8 @@ def load_new_batch(train_dl: DataLoader, train_iter: Iterable, train_state: Trai
         batch = next(train_iter)
         train_state.num_consumed_samples_in_epoch = 0
         if hasattr(train_state, "batch_sampler"):
+            train_state.batch_sampler.batch_count = 0
+            train_state.batch_sampler.num_consumed_samples_in_epoch = 0
             train_state.batch_sampler_iter = iter(train_state.batch_sampler)
             next(train_state.batch_sampler_iter)
     timer("batch-gen").stop()
@@ -672,42 +554,6 @@ def record_current_batch_training_metrics(
 
         for key, value in acc_perplex.items():
             infos[key] = value
-
-        grad_profiling_config = gpc.config.get("grad_profiling", {})
-        interval_steps = grad_profiling_config.get("interval_steps", 1)
-        if batch_count % interval_steps == 0:
-            layer_metrics = [metric for metric in ["layer_grad_norm", "layer_zero_grad"] if metric in grad_norm]
-            param_metrics = [metric for metric in ["param_grad_norm", "param_zero_grad"] if metric in grad_norm]
-            layer_names = grad_profiling_config.get("layers", [])
-            for metric_name in layer_metrics:
-                metric = grad_norm.get(metric_name)
-                for group_name, layer_group in metric.items():
-                    title = f"{metric_name}/{group_name}"
-                    metrics = {k: v for k, v in layer_group.items() if not layer_names or k in layer_names}
-                    if metrics:
-                        writer.add_scalars(key=title, value=metrics, step=train_state.step_count)
-                del grad_norm[metric_name]
-            for metric_name in param_metrics:
-                metric = grad_norm.get(metric_name)
-                for group_name, layer_group in metric.items():
-                    for param_name, param_group in layer_group.items():
-                        title = f"{param_name}/{group_name}_{metric_name}"
-                        metrics = {k: v for k, v in param_group.items() if not layer_names or k in layer_names}
-                        if metrics:
-                            writer.add_scalars(key=title, value=metrics, step=train_state.step_count)
-                del grad_norm[metric_name]
-            if grad_profiling_config.get("vocab_grad_norm_profiling", False):
-                local_save_path = f"RUN/{gpc.config.JOB_NAME}/{launch_time()}/grad_norm"
-                os.makedirs(local_save_path, exist_ok=True)
-                local_save_file = f"{local_save_path}/vocab_grad_norm.pt"
-                vocab_grad_norms = grad_norm.get("vocab_grad_norm")
-                if vocab_grad_norms:
-                    try:
-                        with open(local_save_file, "ab+") as vocab_f:
-                            pickle.dump((train_state.step_count, vocab_grad_norms), vocab_f)
-                    except IOError as e:
-                        logger.warning(f"Error saving vocab_grad_norm: {e}")
-                del grad_norm["vocab_grad_norm"]
 
         line = ""
         for key, value in infos.items():

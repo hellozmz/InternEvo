@@ -11,7 +11,8 @@ NUM_ATTENTION_HEAD = 32
 NUM_KV_ATTENTION_HEAD = 8
 MLP_RATIO = 3.5
 ## ! # NUM_LAYER = 32
-NUM_LAYER = 16
+# NUM_LAYER = 16
+NUM_LAYER = 2
 
 
 MODEL_ONLY_FOLDER = "local:llm_ckpts/xxxx"
@@ -56,7 +57,8 @@ data = dict(
     # defaults to 0, means disable evaluate
     valid_every=0,
     pack_sample_into_one=False,
-    total_steps=20,
+    # total_steps=20,
+    total_steps=2000,
     skip_batches="",
     # rampup_batch_size (str): A string with three space-separated integers representing the
     #       starting batch size, the increment, and the number of steps between

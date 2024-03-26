@@ -196,4 +196,9 @@ monitor = dict(
 
 # metric_dtype can be "fp32" or other string
 # only when set to "fp32" will use fp32 to calc in metrics
+<<<<<<< HEAD
 # metric_dtype = "fp32"
+=======
+# metric_dtype = "fp32"
+
+>>>>>>> 97796271f590e405173a9f4d3a9c825f5e8fd01c

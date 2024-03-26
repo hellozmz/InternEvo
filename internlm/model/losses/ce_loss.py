@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 
-from flash_attn.losses.cross_entropy import CrossEntropyLoss as FlashCrossEntropyLoss
 from torch import nn
 
 from internlm.core.context import ParallelMode
@@ -24,7 +23,11 @@ class FlashGPTLMLoss(nn.Module):
             label_smoothing = 0
         self.label_smoothing = label_smoothing
 
-        if parallel_output:
+        if gpc.config.model.use_flash_attn and parallel_output:
+            from flash_attn.losses.cross_entropy import (
+                CrossEntropyLoss as FlashCrossEntropyLoss,
+            )
+
             self.loss_fn = FlashCrossEntropyLoss(
                 reduction="mean",
                 inplace_backward=True,
@@ -32,6 +35,7 @@ class FlashGPTLMLoss(nn.Module):
                 label_smoothing=label_smoothing,
             )  # The loss in this place is bound to the gather_output initialized by VocabParallelClassifier1D
         else:
+            assert parallel_output is False, "parallel_output should be False when using nn.CrossEntropyLoss func"
             # Here, the output will gather output is set in the model, so use ordinary loss
             self.loss_fn = nn.CrossEntropyLoss(reduction="mean", label_smoothing=label_smoothing)
 

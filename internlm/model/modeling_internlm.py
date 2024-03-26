@@ -5,28 +5,23 @@ import math
 from typing import Optional
 
 import torch
-from flash_attn.modules.embedding import ParallelGPT2Embeddings
-from flash_attn.modules.mlp import ParallelFusedMLP
 from torch import nn
 
 from internlm.core.context import ParallelMode
 from internlm.core.context.parallel_context import global_context as gpc
 from internlm.core.naive_amp import set_output_attr_to_module
 from internlm.initialize.initialize_tensor import normal_, scaled_init_method_normal
-from internlm.model.embedding import Embedding1D
-from internlm.model.linear import (
-    RewardModelLinear,
-    ScaleColumnParallelLinear,
-    get_mlp_cls,
-)
-from internlm.model.multi_head_attention import MHA
+from internlm.model.modules.embedding import Embedding1D
+from internlm.model.modules.mlp import get_mlp_cls
+from internlm.model.modules.multi_head_attention import MHA
+from internlm.model.ops.linear import RewardModelLinear, ScaleColumnParallelLinear
 from internlm.model.utils import (
     gather_forward_split_backward,
     split_forward_gather_backward,
     try_import_RMSNorm,
 )
+from internlm.solver.activation_checkpoint import activation_checkpoint
 from internlm.solver.pipeline_utils import partition_uniform
-from internlm.utils.checkpoint import activation_checkpoint
 from internlm.utils.common import filter_kwargs
 from internlm.utils.logger import get_logger
 from internlm.utils.registry import MODEL_INITIALIZER
@@ -120,7 +115,7 @@ class PackedFlashBaseLayer1D(nn.Module):
             self.norm1 = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
             self.norm2 = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
 
-        if use_swiglu:
+        if use_swiglu or not use_flash_attn:
             mlp_cls = get_mlp_cls(self.tp_mode)
             self.mlp = mlp_cls(
                 hidden_size,
@@ -132,6 +127,8 @@ class PackedFlashBaseLayer1D(nn.Module):
                 dtype=dtype,
             )
         else:
+            from flash_attn.modules.mlp import ParallelFusedMLP
+
             self.mlp = ParallelFusedMLP(
                 hidden_size,
                 int(hidden_size * mlp_ratio),
@@ -173,7 +170,7 @@ class PackedFlashBaseLayer1D(nn.Module):
                     if self.use_scaled_init and "w2" in name:
                         scaled_init_method_normal(sigma=0.006, num_layers=self.layer_idx + 1)(param.data)
                     else:
-                        normal_(std=0.006 if "w1" in name or "w2" in name else 0.0015)(param.data)
+                        normal_(std=0.006 if "w1" in name or "w3" in name else 0.0015)(param.data)
                 else:
                     if self.use_scaled_init and "fc1" not in name:
                         scaled_init_method_normal(sigma=0.006, num_layers=self.layer_idx + 1)(param.data)
@@ -312,9 +309,11 @@ class PackedFlashInternLm1D(nn.Module):
         else:
             head_cls = ScaleColumnParallelLinear
         if first:
-            if embed_split_hidden:
+            if embed_split_hidden or not use_flash_attn:
                 self.embedding = Embedding1D(num_embeddings=vocab_size, embedding_dim=hidden_size)
             else:
+                from flash_attn.modules.embedding import ParallelGPT2Embeddings
+
                 self.embedding = ParallelGPT2Embeddings(
                     embed_dim=hidden_size,
                     vocab_size=vocab_size,
@@ -421,7 +420,7 @@ class PackedFlashInternLm1D(nn.Module):
             else:  # Training
                 hidden_states = self.head(hidden_states, gather_dim=0, tp_mode=self.tp_mode)
 
-        if not self.parallel_output:
+        if not self.parallel_output and gpc.is_pipeline_last_stage():
             hidden_states = gather_forward_split_backward(hidden_states, ParallelMode.TENSOR, dim=-1)
         return hidden_states
 

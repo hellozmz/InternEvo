@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+# <<<<<<< HEAD
 # from flash_attn import flash_attn_varlen_kvpacked_func
 from flash_attn.modules.embedding import ParallelGPT2Embeddings
 from flash_attn.modules.mha import (
@@ -16,6 +17,8 @@ from flash_attn.modules.mha import (
 )
 from flash_attn.modules.mlp import ParallelFusedMLP
 # from flash_attn.ops.layer_norm import dropout_add_layer_norm
+# =======
+# >>>>>>> 97796271f590e405173a9f4d3a9c825f5e8fd01c
 from torch import nn
 
 from internlm.core.context import ParallelMode
@@ -26,25 +29,30 @@ from internlm.initialize.initialize_tensor import (
     scaled_init_method_uniform,
     uniform_,
 )
-from internlm.model.embedding import (
+from internlm.model.modules.embedding import (
     DynamicNTKScalingRotaryEmbedding,
     Embedding1D,
     RotaryEmbedding,
 )
-from internlm.model.linear import (
-    InternLM2ScaleColumnParallelLinear,
-    RewardModelLinear,
-    get_linear_cls,
-    get_mlp_cls,
+from internlm.model.modules.mlp import get_mlp_cls
+from internlm.model.modules.multi_head_attention import (
+    CrossAttention,
+    DistributedAttention,
+    SelfAttention,
+    _update_kv_cache,
 )
-from internlm.model.multi_head_attention import DistributedAttention
+from internlm.model.ops.linear import (
+    RewardModelLinear,
+    ScaleColumnParallelLinearWithNormHead,
+    get_linear_cls,
+)
 from internlm.model.utils import (
     gather_forward_split_backward,
     split_forward_gather_backward,
     try_import_RMSNorm,
 )
+from internlm.solver.activation_checkpoint import activation_checkpoint
 from internlm.solver.pipeline_utils import partition_uniform
-from internlm.utils.checkpoint import activation_checkpoint
 from internlm.utils.common import filter_kwargs
 from internlm.utils.logger import get_logger
 from internlm.utils.registry import MODEL_INITIALIZER
@@ -157,6 +165,10 @@ class MHA(nn.Module):
             **factory_kwargs,
         )
 
+        if use_flash_attn:
+            from flash_attn import flash_attn_varlen_kvpacked_func
+            from flash_attn.modules.mha import FlashCrossAttention, FlashSelfAttention
+
         inner_attn_cls = FlashSelfAttention if use_flash_attn else SelfAttention
         inner_cross_attn_cls = FlashCrossAttention if use_flash_attn else CrossAttention
         self.inner_attn = inner_attn_cls(causal=causal, softmax_scale=softmax_scale, attention_dropout=dropout)
@@ -168,7 +180,7 @@ class MHA(nn.Module):
         self.inner_cross_attn_softmax_scale = softmax_scale
         self.inner_cross_attn_dropout = dropout
 
-        self.attn = flash_attn_varlen_kvpacked_func
+        self.attn = flash_attn_varlen_kvpacked_func if use_flash_attn else SelfAttention
         if self.tp_mode == "isp":
             self.attn = DistributedAttention(self.attn, sequence_process_group=sequence_process_group)
 
@@ -300,6 +312,8 @@ class MHA(nn.Module):
 
             if hasattr(inference_params, "attention_mask") and inference_params.attention_mask is not None:
                 assert self.use_flash_attn is True
+                from flash_attn import flash_attn_varlen_kvpacked_func
+
                 if inference_params.sequence_len_offset == 0:  # First entrance, attnmask (bs*seqlen*seqlen)
                     attn_mask = inference_params.attention_mask[:, None, ...]
                     attn_mask = torch.logical_or(
@@ -581,12 +595,14 @@ class PackedFlashLlamaLayer1D(nn.Module):
         else:
             self.attention_norm = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
             self.ffn_norm = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
-        if self.fused_dropout_add_ln:
+        if self.fused_dropout_add_ln and self.use_flash_attn:
+            from flash_attn.ops.layer_norm import dropout_add_layer_norm
+
             assert dropout_add_layer_norm is not None, "dropout_add_ln is not installed"
             assert isinstance(self.attention_norm, nn.LayerNorm) and isinstance(self.dropout1, nn.Dropout)
 
         sequence_parallel = gpc.config.parallel.get("sequence_parallel", False)
-        if use_swiglu:
+        if use_swiglu or not gpc.config.model.use_flash_attn:
             ffn = get_mlp_cls(self.tp_mode)
             self.feed_forward = ffn(
                 hidden_size,
@@ -598,6 +614,8 @@ class PackedFlashLlamaLayer1D(nn.Module):
                 dtype=dtype,
             )
         else:
+            from flash_attn.modules.mlp import ParallelFusedMLP
+
             self.feed_forward = ParallelFusedMLP(
                 hidden_size,
                 int(hidden_size * mlp_ratio),
@@ -852,14 +870,16 @@ class PackedFlashLlama1D(nn.Module):
         if is_reward:
             head_cls = RewardModelLinear
         else:
-            head_cls = InternLM2ScaleColumnParallelLinear
+            head_cls = ScaleColumnParallelLinearWithNormHead
 
         sequence_parallel = gpc.config.parallel.get("sequence_parallel", False)
 
         if first:
-            if embed_split_hidden:
+            if embed_split_hidden or not gpc.config.model.use_flash_attn:
                 self.tok_embeddings = Embedding1D(num_embeddings=vocab_size, embedding_dim=hidden_size)
             else:
+                from flash_attn.modules.embedding import ParallelGPT2Embeddings
+
                 self.tok_embeddings = ParallelGPT2Embeddings(
                     embed_dim=hidden_size,
                     vocab_size=vocab_size,
@@ -923,10 +943,10 @@ class PackedFlashLlama1D(nn.Module):
                 else:
                     self.norm = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
 
-            if norm_head and not issubclass(head_cls, InternLM2ScaleColumnParallelLinear):
+            if norm_head and not issubclass(head_cls, ScaleColumnParallelLinearWithNormHead):
                 raise TypeError(
                     "Parameter ``norm_head`` should only be True when head_cls is "
-                    f"``InternLM2ScaleColumnParallelLinear``, instead of {head_cls}."
+                    f"``ScaleColumnParallelLinearWithNormHead``, instead of {head_cls}."
                 )
             self.output = head_cls(  # pylint: disable=E1123
                 in_features=hidden_size,
@@ -992,7 +1012,7 @@ class PackedFlashLlama1D(nn.Module):
             else:  # Training
                 hidden_states = self.output(hidden_states, gather_dim=0, tp_mode=self.tp_mode)
 
-        if not self.parallel_output:
+        if not self.parallel_output and gpc.is_pipeline_last_stage():
             hidden_states = gather_forward_split_backward(hidden_states, ParallelMode.TENSOR, dim=-1)
 
         return hidden_states

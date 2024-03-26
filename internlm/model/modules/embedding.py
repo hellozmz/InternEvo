@@ -3,18 +3,15 @@
 
 from typing import Tuple
 
-import rotary_emb
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from flash_attn.layers.rotary import ApplyRotaryEmb as LegacyApplyRotaryEmb
-from flash_attn.layers.rotary import ApplyRotaryEmbQKV_ as LegacyApplyRotaryEmbQKV_
 from torch import Tensor, nn
 
 from internlm.core.context import ParallelMode
 from internlm.core.context import global_context as gpc
 
-from .utils import gather_forward_split_backward, split_forward_gather_backward
+from ..utils import gather_forward_split_backward, split_forward_gather_backward
 
 
 class Embedding1D(nn.Module):
@@ -63,56 +60,188 @@ class Embedding1D(nn.Module):
         return output
 
 
+def apply_rotary_torch(x1, x2, cos, sin, conj):
+    assert x1.device == x2.device == cos.device == sin.device, "All inputs must be on the same device"
+    assert x1.dtype == x2.dtype == cos.dtype == sin.dtype, "All inputs must have the same dtype"
+    assert x1.size() == x2.size(), "Input x1 and x2 must have the same sizes"
+    assert cos.size() == sin.size(), "Input cos and sin must have the same sizes"
+
+    if conj:
+        out1 = x1 * cos + x2 * sin
+        out2 = -x1 * sin + x2 * cos
+    else:
+        out1 = x1 * cos - x2 * sin
+        out2 = x1 * sin + x2 * cos
+
+    return out1, out2
+
+
+class ApplyRotaryEmb(torch.autograd.Function):
+    """
+    ApplyRotaryEmb
+    """
+
+    @staticmethod
+    def forward(ctx, x, cos, sin, interleaved=False):
+        """
+            x: (batch_size, seqlen, nheads, headdim)
+            cos, sin: (seqlen, rotary_dim / 2)
+            interleaved: if True, rotate pairs of even and odd dimensions (GPT-J style) instead
+                of 1st half and 2nd half (GPT-NeoX style).
+        rotary_dim must be <= headdim
+        Apply rotary embedding to the first rotary_dim of x.
+        """
+        _, seqlen, _, headdim = x.shape
+        rotary_seqlen, rotary_dim = cos.shape
+        rotary_dim *= 2
+        assert rotary_dim <= headdim
+        assert seqlen <= rotary_seqlen
+        assert sin.shape == (rotary_seqlen, rotary_dim // 2)
+        x_ro = x[..., :rotary_dim]
+        x1, x2 = x_ro.chunk(2, dim=-1) if not interleaved else (x_ro[..., ::2], x_ro[..., 1::2])
+        out = torch.empty_like(x)
+        out_ro = out[..., :rotary_dim]
+        o1, o2 = out_ro.chunk(2, dim=-1) if not interleaved else (out_ro[..., ::2], out_ro[..., 1::2])
+        if gpc.config.model.use_flash_attn:
+            import rotary_emb
+
+            rotary_emb.apply_rotary(
+                x1, x2, rearrange(cos[:seqlen], "s d -> s 1 d"), rearrange(sin[:seqlen], "s d -> s 1 d"), o1, o2, False
+            )
+        else:
+            o1, o2 = apply_rotary_torch(
+                x1, x2, rearrange(cos[:seqlen], "s d -> s 1 d"), rearrange(sin[:seqlen], "s d -> s 1 d"), False
+            )
+        if rotary_dim < headdim:
+            out[..., rotary_dim:].copy_(x[..., rotary_dim:])
+        ctx.save_for_backward(cos, sin)
+        ctx.interleaved = interleaved
+        return out
+
+    @staticmethod
+    def backward(ctx, do):
+        cos, sin = ctx.saved_tensors
+        _, seqlen, _, headdim = do.shape
+        rotary_dim = cos.shape[-1]
+        rotary_dim *= 2
+        do_ro = do[..., :rotary_dim]
+        do1, do2 = do_ro.chunk(2, dim=-1) if not ctx.interleaved else (do_ro[..., ::2], do_ro[..., 1::2])
+        dx = torch.empty_like(do)
+        dx_ro = dx[..., :rotary_dim]
+        dx1, dx2 = dx_ro.chunk(2, dim=-1) if not ctx.interleaved else (dx_ro[..., ::2], dx_ro[..., 1::2])
+        if gpc.config.model.use_flash_attn:
+            import rotary_emb
+
+            rotary_emb.apply_rotary(
+                do1,
+                do2,
+                rearrange(cos[:seqlen], "s d -> s 1 d"),
+                rearrange(sin[:seqlen], "s d -> s 1 d"),
+                dx1,
+                dx2,
+                True,
+            )
+        else:
+            dx1, dx2 = apply_rotary_torch(
+                do1, do2, rearrange(cos[:seqlen], "s d -> s 1 d"), rearrange(sin[:seqlen], "s d -> s 1 d"), True
+            )
+        if rotary_dim < headdim:
+            dx[..., rotary_dim:].copy_(do[..., rotary_dim:])
+        return dx, None, None, None, None
+
+
+apply_rotary_emb = ApplyRotaryEmb.apply
+
+
 class ApplyRotaryEmbQKV_(torch.autograd.Function):
     """
     ApplyRotaryEmbQKV_
     """
 
     @staticmethod
-    def forward(ctx, qkv, cos, sin, cos_k=None, sin_k=None):
+    def forward(ctx, qkv, cos, sin, cos_k=None, sin_k=None, interleaved=False):
         """
-            qkv: (total, 3, nheads, headdim)
+            qkv: (total, 3, nheads, headdim) / (batch_size, seqlen, 3, nheads, headdim)
             cos, sin: (seqlen, rotary_dim / 2)
             cos_k, sin_k: (seqlen, rotary_dim / 2), optional
+            interleaved: if True, rotate pairs of even and odd dimensions (GPT-J style) instead of
+                1st half and 2nd half (GPT-NeoX style).
         rotary_dim must be <= headdim
         Apply rotary embedding *inplace* to the first rotary_dim of q and k.
         """
-        _, three, _, headdim = qkv.shape
+        # len(qkv.shape) == 4 means the format of qkv is (total, 3, nheads, headdim) which is packed,
+        # otherwise the format of qkv is (batch_size, seqlen, 3, nheads, headdim) which is unpacked.
+        # We handle both packed qkv and unpacked qkv scenario in this class.
+        three = qkv.shape[1] if len(qkv.shape) == 4 else qkv.shape[2]
         assert three == 3
+        seqlen = None if len(qkv.shape) == 4 else qkv.shape[1]
         rotary_seqlen, rotary_dim = cos.shape
+        if len(qkv.shape) != 4:
+            assert seqlen <= rotary_seqlen
+        headdim = qkv.shape[-1]
         rotary_dim *= 2
         assert rotary_dim <= headdim
         cos_k = cos if cos_k is None else cos_k
         sin_k = sin if sin_k is None else sin_k
         assert sin.shape == cos_k.shape == sin_k.shape == (rotary_seqlen, rotary_dim // 2)
-        q1, q2 = qkv[:, 0, :, :rotary_dim].chunk(2, dim=-1)
-        rotary_emb.apply_rotary(q1, q2, rearrange(cos, "s d -> s 1 d"), rearrange(sin, "s d -> s 1 d"), q1, q2, False)
-        k1, k2 = qkv[:, 1, :, :rotary_dim].chunk(2, dim=-1)
-        rotary_emb.apply_rotary(
-            k1, k2, rearrange(cos_k, "s d -> s 1 d"), rearrange(sin_k, "s d -> s 1 d"), k1, k2, False
+        q_ro = qkv[:, 0, :, :rotary_dim] if len(qkv.shape) == 4 else qkv[:, :, 0, :, :rotary_dim]
+        q1, q2 = q_ro.chunk(2, dim=-1) if not interleaved else (q_ro[..., ::2], q_ro[..., 1::2])
+        re_cos = rearrange(cos, "s d -> s 1 d") if len(qkv.shape) == 4 else rearrange(cos[:seqlen], "s d -> s 1 d")
+        re_sin = rearrange(sin, "s d -> s 1 d") if len(qkv.shape) == 4 else rearrange(sin[:seqlen], "s d -> s 1 d")
+        if gpc.config.model.use_flash_attn:
+            import rotary_emb
+
+            rotary_emb.apply_rotary(q1, q2, re_cos, re_sin, q1, q2, False)
+        else:
+            q1, q2 = apply_rotary_torch(q1, q2, re_cos, re_sin, False)
+        k_ro = qkv[:, 1, :, :rotary_dim] if len(qkv.shape) == 4 else qkv[:, :, 1, :, :rotary_dim]
+        k1, k2 = k_ro.chunk(2, dim=-1) if not interleaved else (k_ro[..., ::2], k_ro[..., 1::2])
+        re_cos_k = (
+            rearrange(cos_k, "s d -> s 1 d") if len(qkv.shape) == 4 else rearrange(cos_k[:seqlen], "s d -> s 1 d")
         )
+        re_sin_k = (
+            rearrange(sin_k, "s d -> s 1 d") if len(qkv.shape) == 4 else rearrange(sin_k[:seqlen], "s d -> s 1 d")
+        )
+        if gpc.config.model.use_flash_attn:
+            rotary_emb.apply_rotary(k1, k2, re_cos_k, re_sin_k, k1, k2, False)
+        else:
+            k1, k2 = apply_rotary_torch(k1, k2, re_cos_k, re_sin_k, False)
         ctx.save_for_backward(cos, sin, cos_k, sin_k)
+        ctx.interleaved = interleaved
         return qkv
 
     @staticmethod
     def backward(ctx, dqkv):
         cos, sin, cos_k, sin_k = ctx.saved_tensors
+        seqlen = None if len(dqkv.shape) == 4 else dqkv.shape[1]
         rotary_dim = cos.shape[-1]
         rotary_dim *= 2
-        dq1, dq2 = dqkv[:, 0, :, :rotary_dim].chunk(2, dim=-1)
-        rotary_emb.apply_rotary(
-            dq1, dq2, rearrange(cos, "s d -> s 1 d"), rearrange(sin, "s d -> s 1 d"), dq1, dq2, True
+        dq_ro = dqkv[:, 0, :, :rotary_dim] if len(dqkv.shape) == 4 else dqkv[:, :, 0, :, :rotary_dim]
+        dq1, dq2 = dq_ro.chunk(2, dim=-1) if not ctx.interleaved else (dq_ro[..., ::2], dq_ro[..., 1::2])
+        re_cos = rearrange(cos, "s d -> s 1 d") if len(dqkv.shape) == 4 else rearrange(cos[:seqlen], "s d -> s 1 d")
+        re_sin = rearrange(sin, "s d -> s 1 d") if len(dqkv.shape) == 4 else rearrange(sin[:seqlen], "s d -> s 1 d")
+        if gpc.config.model.use_flash_attn:
+            import rotary_emb
+
+            rotary_emb.apply_rotary(dq1, dq2, re_cos, re_sin, dq1, dq2, True)
+        else:
+            dq1, dq2 = apply_rotary_torch(dq1, dq2, re_cos, re_sin, True)
+        dk_ro = dqkv[:, 1, :, :rotary_dim] if len(dqkv.shape) == 4 else dqkv[:, :, 1, :, :rotary_dim]
+        dk1, dk2 = dk_ro.chunk(2, dim=-1) if not ctx.interleaved else (dk_ro[..., ::2], dk_ro[..., 1::2])
+        re_cos_k = (
+            rearrange(cos_k, "s d -> s 1 d") if len(dqkv.shape) == 4 else rearrange(cos_k[:seqlen], "s d -> s 1 d")
         )
-        dk1, dk2 = dqkv[:, 1, :, :rotary_dim].chunk(2, dim=-1)
-        rotary_emb.apply_rotary(
-            dk1, dk2, rearrange(cos_k, "s d -> s 1 d"), rearrange(sin_k, "s d -> s 1 d"), dk1, dk2, True
+        re_sin_k = (
+            rearrange(sin_k, "s d -> s 1 d") if len(dqkv.shape) == 4 else rearrange(sin_k[:seqlen], "s d -> s 1 d")
         )
-        return dqkv, None, None, None, None
+        if gpc.config.model.use_flash_attn:
+            rotary_emb.apply_rotary(dk1, dk2, re_cos_k, re_sin_k, dk1, dk2, True)
+        else:
+            dk1, dk2 = apply_rotary_torch(dk1, dk2, re_cos_k, re_sin_k, True)
+        return dqkv, None, None, None, None, None
 
 
 apply_rotary_emb_qkv_ = ApplyRotaryEmbQKV_.apply
-legacy_apply_rotary_embed_qkv = LegacyApplyRotaryEmbQKV_.apply
-legacy_apply_rotary_embed = LegacyApplyRotaryEmb.apply
 
 
 class RotaryEmbedding(torch.nn.Module):
@@ -209,11 +338,9 @@ class RotaryEmbedding(torch.nn.Module):
         """
         self._update_cos_sin_cache(qkv, seqlen_offset + qkv.shape[1])
         if self.scale is None:
-            return legacy_apply_rotary_embed_qkv(
-                qkv, self._cos_cached[seqlen_offset:], self._sin_cached[seqlen_offset:]
-            )
+            return apply_rotary_emb_qkv_(qkv, self._cos_cached[seqlen_offset:], self._sin_cached[seqlen_offset:])
         else:
-            return legacy_apply_rotary_embed_qkv(
+            return apply_rotary_emb_qkv_(
                 qkv,
                 self._cos_cached[seqlen_offset:],
                 self._sin_cached[seqlen_offset:],
@@ -225,13 +352,13 @@ class RotaryEmbedding(torch.nn.Module):
         assert self.scale is None
         self._update_cos_sin_cache(x, indexes)
         x = x[None, ...]
-        ret = legacy_apply_rotary_embed(x, self._cos_cached[indexes], self._sin_cached[indexes]).squeeze(0)
+        ret = apply_rotary_emb(x, self._cos_cached[indexes], self._sin_cached[indexes]).squeeze(0)
         return ret
 
     def _single_eval_forward(self, x, seqlen_offset=0):
         assert self.scale is None
         self._update_cos_sin_cache(x, seqlen_offset + x.shape[1])
-        return legacy_apply_rotary_embed(x, self._cos_cached[seqlen_offset:], self._sin_cached[seqlen_offset:])
+        return apply_rotary_emb(x, self._cos_cached[seqlen_offset:], self._sin_cached[seqlen_offset:])
 
 
 class LinearRotaryEmbedding(RotaryEmbedding):
