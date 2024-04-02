@@ -299,9 +299,13 @@ def initialize_optimizer(model: Union[nn.Module, nn.ModuleList], isp_communicato
     adam_extra_kwargs = {}
     # set fused=True to avoid nan grad norm when model size is larger and use_fp32_norm=True
 
-    # TODO(caikun): add DIPU backend adamw
     if internlm_accelerator.get_accelerator_backend() == AcceleratorType.NPU:
         internlm_adamw = torch_npu.optim.NpuFusedAdamW
+    elif internlm_accelerator.get_accelerator_backend() == AcceleratorType.DIPU:
+        from deeplink_ext.internlm_ops.adamw import adamw_for_internlm
+        torch._fused_adamw_ = adamw_for_internlm
+        internlm_adamw = torch.optim.AdamW
+        adam_extra_kwargs["fused"] = True
     else:
         internlm_adamw = torch.optim.AdamW
         if torch.__version__ >= "2.1.0" and internlm_accelerator.get_accelerator_backend() == AcceleratorType.GPU:
