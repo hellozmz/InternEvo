@@ -91,7 +91,9 @@ def set_fp32_attr_for_model(model: Union[nn.Module, nn.ModuleList]):
 
     for _chunk in model:
         for _, module in _chunk.named_modules():
-            if isinstance(module, (RMSNorm, nn.LayerNorm)) and gpc.config.get("use_fp32_norm", False):
+            if isinstance(module, (RMSNorm, nn.LayerNorm)) and gpc.config.get(
+                "use_fp32_norm", False
+            ):
                 set_fp32_attr_to_module(module)
 
 
@@ -111,7 +113,8 @@ def set_parallel_attr_for_param_groups(model: Union[nn.Module, nn.ModuleList]):
             from flash_attn.modules.embedding import ParallelGPT2Embeddings
 
         if isinstance(module, (Embedding1D, BaseScaleColumnParallelLinear)) or (
-            gpc.config.use_cuda_flash_attn and isinstance(module, ParallelGPT2Embeddings)
+            gpc.config.use_cuda_flash_attn
+            and isinstance(module, ParallelGPT2Embeddings)
         ):
             for param in module.parameters():
                 if gpc.is_initialized(ParallelMode.TENSOR) and is_using_isp():
@@ -122,15 +125,28 @@ def set_parallel_attr_for_param_groups(model: Union[nn.Module, nn.ModuleList]):
         # for linear module
         if isinstance(
             module,
-            (ColumnParallelLinearTorch, RowParallelLinearTorch, MegaBlockFeedForward, MegaBlockGroupedFeedForward),
+            (
+                ColumnParallelLinearTorch,
+                RowParallelLinearTorch,
+                MegaBlockFeedForward,
+                MegaBlockGroupedFeedForward,
+            ),
         ):
             for param in module.parameters():
                 if gpc.is_initialized(ParallelMode.EXPERT_DATA) and is_moe_param(param):
                     # module should be MoE experts's linear
                     setattr(param, IS_TENSOR_EXPERT_DATA_PARALLEL, True)
-                elif not is_moe_param(param) and gpc.is_initialized(ParallelMode.TENSOR) and not is_using_isp():
+                elif (
+                    not is_moe_param(param)
+                    and gpc.is_initialized(ParallelMode.TENSOR)
+                    and not is_using_isp()
+                ):
                     setattr(param, IS_TENSOR_ZERO_PARALLEL, True)
-                elif not is_moe_param(param) and gpc.is_initialized(ParallelMode.WEIGHT) and is_using_isp():
+                elif (
+                    not is_moe_param(param)
+                    and gpc.is_initialized(ParallelMode.WEIGHT)
+                    and is_using_isp()
+                ):
                     setattr(param, IS_WEIGHT_ZERO_PARALLEL, True)
 
     if not isinstance(model, nn.ModuleList):
@@ -155,7 +171,10 @@ def set_parallel_attr_for_param_groups(model: Union[nn.Module, nn.ModuleList]):
 
 
 @llm_timeout(func_name="initialize_model")
-def initialize_model(pre_process_func: Optional[Callable] = None, post_process_func: Optional[Callable] = None):
+def initialize_model(
+    pre_process_func: Optional[Callable] = None,
+    post_process_func: Optional[Callable] = None,
+):
     """
     Initialize model with Automatic Mixed Precision.
 
@@ -165,7 +184,9 @@ def initialize_model(pre_process_func: Optional[Callable] = None, post_process_f
     """
     if pre_process_func:
         pre_process_output = pre_process_func()
-    model = MODEL_INITIALIZER.get_module(module_name=gpc.config.model_type)(**(gpc.config.model))
+    model = MODEL_INITIALIZER.get_module(module_name=gpc.config.model_type)(
+        **(gpc.config.model)
+    )
     if post_process_func:
         post_process_func(pre_process_output)
 
@@ -280,7 +301,9 @@ def initialize_isp_communicator(model: Union[nn.Module, nn.ModuleList]):
 
 
 @llm_timeout(func_name="initialize_optimizer")
-def initialize_optimizer(model: Union[nn.Module, nn.ModuleList], isp_communicator: ISPCommunicator = None):
+def initialize_optimizer(
+    model: Union[nn.Module, nn.ModuleList], isp_communicator: ISPCommunicator = None
+):
     """
     Initialize optimizer.
 
@@ -305,11 +328,15 @@ def initialize_optimizer(model: Union[nn.Module, nn.ModuleList], isp_communicato
         internlm_adamw = torch.optim.AdamW
         if torch.__version__ >= "2.1.0":
             from deeplink_ext.internlm_ops.adamw import adamw_for_internlm
+
             torch._fused_adamw_ = adamw_for_internlm
             adam_extra_kwargs["fused"] = True
     else:
         internlm_adamw = torch.optim.AdamW
-        if torch.__version__ >= "2.1.0" and internlm_accelerator.get_accelerator_backend() == AcceleratorType.GPU:
+        if (
+            torch.__version__ >= "2.1.0"
+            and internlm_accelerator.get_accelerator_backend() == AcceleratorType.GPU
+        ):
             adam_extra_kwargs["fused"] = True
 
     naive_optimizer = internlm_adamw(
@@ -335,7 +362,9 @@ def initialize_optimizer(model: Union[nn.Module, nn.ModuleList], isp_communicato
         zero_cfg.overlap_sync_grad = False
 
     if zero_cfg.overlap_sync_param:
-        param_bcast_sync_handler = ParamAsyncBcastHandler(ParallelMode.ZERO1, model, isp_communicator)
+        param_bcast_sync_handler = ParamAsyncBcastHandler(
+            ParallelMode.ZERO1, model, isp_communicator
+        )
     else:
         param_bcast_sync_handler = None
 
@@ -354,7 +383,9 @@ def initialize_optimizer(model: Union[nn.Module, nn.ModuleList], isp_communicato
             zero_cfg=zero_cfg,
         )
 
-    beta2_scheduler = Beta2Scheduler(optimizer=naive_optimizer, **gpc.config.beta2_scheduler)
+    beta2_scheduler = Beta2Scheduler(
+        optimizer=naive_optimizer, **gpc.config.beta2_scheduler
+    )
 
     lr_scheduler = FineTuneCosineAnnealingWarmupLR(optimizer, **gpc.config.lr_scheduler)
 
@@ -372,13 +403,19 @@ def get_scheduler_hooks(metric, zero_optim, isp_communicator) -> List[SchedulerH
                     gpc.is_using_parallel_mode(ParallelMode.PIPELINE)
                     and hasattr(gpc.config.model, "num_chunks")
                     and gpc.config.model.num_chunks > 1
-                    and gpc.config.parallel["pipeline"].get("interleaved_overlap", False)
+                    and gpc.config.parallel["pipeline"].get(
+                        "interleaved_overlap", False
+                    )
                 ),
             ),
         )
 
-    if isp_communicator is not None and gpc.config.parallel["weight"].get("overlap", False):
-        scheduler_hooks.append(ISPCommunicatorSchedulerHook(isp_communicator, zero_optim))
+    if isp_communicator is not None and gpc.config.parallel["weight"].get(
+        "overlap", False
+    ):
+        scheduler_hooks.append(
+            ISPCommunicatorSchedulerHook(isp_communicator, zero_optim)
+        )
 
     return scheduler_hooks
 
@@ -398,7 +435,9 @@ def load_new_batch(train_dl: DataLoader, train_iter: Iterable, train_state: Trai
 
     timer("batch-gen").start()
     try:
-        batch = next(train_iter)  # structure is ({'input_ids': Tensor, 'cu_seqlens': Tensor}, Tensor)
+        batch = next(
+            train_iter
+        )  # structure is ({'input_ids': Tensor, 'cu_seqlens': Tensor}, Tensor)
         if hasattr(train_state, "batch_sampler_iter"):
             next(train_state.batch_sampler_iter)
     except StopIteration:
@@ -415,7 +454,9 @@ def load_new_batch(train_dl: DataLoader, train_iter: Iterable, train_state: Trai
     if batch[0].get("type_ids", None) is not None:
         # if use_packed_dataset is False, we need to unpack type_ids
         if not gpc.config.data.use_packed_dataset:
-            batch[0]["type_ids"] = unpack_data(batch[0]["type_ids"], batch[0]["cu_seqlens"], is_type_ids=True)
+            batch[0]["type_ids"] = unpack_data(
+                batch[0]["type_ids"], batch[0]["cu_seqlens"], is_type_ids=True
+            )
 
     return batch, train_iter
 
@@ -423,8 +464,18 @@ def load_new_batch(train_dl: DataLoader, train_iter: Iterable, train_state: Trai
 def initialize_llm_profile(profiling: bool = False, start_time: str = None):
     """Initialize and return the profiler context manager instance."""
 
-    if profiling and gpc.get_local_rank(ParallelMode.DATA) == 0 and gpc.get_local_rank(ParallelMode.TENSOR) == 0:
-        schedule_config = {"wait": 1, "warmup": 1, "active": 1, "repeat": 1, "skip_first": 3}
+    if (
+        profiling
+        and gpc.get_local_rank(ParallelMode.DATA) == 0
+        and gpc.get_local_rank(ParallelMode.TENSOR) == 0
+    ):
+        schedule_config = {
+            "wait": 1,
+            "warmup": 1,
+            "active": 1,
+            "repeat": 1,
+            "skip_first": 3,
+        }
         trace_path = (
             f"RUN/{gpc.config.JOB_NAME}/{start_time}/traces/rank{gpc.get_global_rank()}_"
             f"dp{gpc.get_local_rank(ParallelMode.DATA)}_"
@@ -438,7 +489,10 @@ def initialize_llm_profile(profiling: bool = False, start_time: str = None):
                 l2_cache=False,
             )
             llm_profile = torch_npu.profiler.profile(
-                activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
+                activities=[
+                    torch_npu.profiler.ProfilerActivity.CPU,
+                    torch_npu.profiler.ProfilerActivity.NPU,
+                ],
                 schedule=torch_npu.profiler.schedule(**schedule_config),
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(trace_path),
                 record_shapes=True,
@@ -451,7 +505,10 @@ def initialize_llm_profile(profiling: bool = False, start_time: str = None):
             logger.info(f"Do profiling for NPU on rank {gpc.get_global_rank()}!")
         else:
             llm_profile = torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
                 schedule=torch.profiler.schedule(**schedule_config),
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(trace_path),
                 with_stack=True,
@@ -492,7 +549,9 @@ def record_current_batch_training_metrics(
 
     timer.store_last_timers()
     if success_update in (0, True):
-        train_state.num_consumed_tokens += batch[1].nelement() * gpc.get_world_size(ParallelMode.DATA)
+        train_state.num_consumed_tokens += batch[1].nelement() * gpc.get_world_size(
+            ParallelMode.DATA
+        )
     if gpc.is_no_pp_or_last_stage():
         acc_perplex = metric.get_metric()
 
@@ -505,12 +564,16 @@ def record_current_batch_training_metrics(
 
         num_tokens_in_batch = batch[1].nelement()
         num_samples_in_batch = sum([len(b) - 1 for b in batch[0]["cu_seqlens"]])
-        max_length_in_batch = max([(b[1:] - b[:-1]).max().item() for b in batch[0]["cu_seqlens"]])
+        max_length_in_batch = max(
+            [(b[1:] - b[:-1]).max().item() for b in batch[0]["cu_seqlens"]]
+        )
         max_samples_in_batch = max([len(b) - 1 for b in batch[0]["cu_seqlens"]])
         min_samples_in_batch = min([len(b) - 1 for b in batch[0]["cu_seqlens"]])
         time_cost = time.time() - start_time
         tk_per_gpu = round(
-            num_tokens_in_batch * gpc.get_world_size(ParallelMode.DATA) / gpc.get_world_size(ParallelMode.GLOBAL),
+            num_tokens_in_batch
+            * gpc.get_world_size(ParallelMode.DATA)
+            / gpc.get_world_size(ParallelMode.GLOBAL),
             4,
         )
         tgs_statistic = train_state.tgs_statistic
@@ -535,12 +598,16 @@ def record_current_batch_training_metrics(
         tgs_statistic["sum_tgs"] += last_tgs_1
 
         if tgs_statistic["sum_step"] % 10 == 0:
-            tgs_statistic["last_tgs_10"] = round(tgs_statistic["sum_last_tg_10"] / tgs_statistic["sum_last_time_10"], 2)
+            tgs_statistic["last_tgs_10"] = round(
+                tgs_statistic["sum_last_tg_10"] / tgs_statistic["sum_last_time_10"], 2
+            )
             tgs_statistic["sum_last_tg_10"] = 0
             tgs_statistic["sum_last_time_10"] = 0
 
         if tgs_statistic["sum_step"] % 50 == 0:
-            tgs_statistic["last_tgs_50"] = round(tgs_statistic["sum_last_tg_50"] / tgs_statistic["sum_last_time_50"], 2)
+            tgs_statistic["last_tgs_50"] = round(
+                tgs_statistic["sum_last_tg_50"] / tgs_statistic["sum_last_time_50"], 2
+            )
             tgs_statistic["sum_last_tg_50"] = 0
             tgs_statistic["sum_last_time_50"] = 0
 
@@ -564,7 +631,9 @@ def record_current_batch_training_metrics(
         infos = {
             "tflops": tflops,
             "step": batch_count,
-            "loss": loss.item() - moe_loss.item() if moe_loss is not None else loss.item(),
+            "loss": loss.item() - moe_loss.item()
+            if moe_loss is not None
+            else loss.item(),
             "tgs (tokens/gpu/second)": tgs_origin,
             "tgs/last_tgs_1": last_tgs_1,
             "tgs/tgs_all": tgs_all,
@@ -582,7 +651,9 @@ def record_current_batch_training_metrics(
         infos["micro_num"] = len(batch[1])
         infos["num_consumed_tokens"] = train_state.num_consumed_tokens
         infos["inf_nan_skip_batches"] = train_state.inf_nan_skip_batches
-        infos["num_samples_in_batch"] = num_samples_in_batch  # the number of batches which have the most samples
+        infos[
+            "num_samples_in_batch"
+        ] = num_samples_in_batch  # the number of batches which have the most samples
         infos["largest_length"] = max_length_in_batch  # the longest input
         infos["largest_batch"] = max_samples_in_batch  # the batch with the most samples
         infos["smallest_batch"] = min_samples_in_batch
@@ -602,7 +673,10 @@ def record_current_batch_training_metrics(
             else:
                 writer.add_scalar(key=key, value=value, step=train_state.step_count)
 
-        if gpc.config.monitor.alert.get("light_monitor_address", None) and batch_count % 50 == 0:
+        if (
+            gpc.config.monitor.alert.get("light_monitor_address", None)
+            and batch_count % 50 == 0
+        ):
             send_heartbeat("train_metrics", infos)
 
         if update_panel:
@@ -611,7 +685,9 @@ def record_current_batch_training_metrics(
                 "step": batch_count,
                 "lr": lr,
                 "num_consumed_tokens": train_state.num_consumed_tokens,
-                "loss": loss.item() - moe_loss.item() if moe_loss is not None else loss.item(),
+                "loss": loss.item() - moe_loss.item()
+                if moe_loss is not None
+                else loss.item(),
                 "flops": tflops,
                 "tgs": last_tgs_1,
                 "acc": acc_perplex["acc"],
