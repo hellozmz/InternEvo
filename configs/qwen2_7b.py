@@ -7,7 +7,7 @@ HIDDEN_SIZE = 3584
 NUM_ATTENTION_HEAD = 28
 NUM_KV_ATTENTION_HEAD = 4
 MLP_RATIO = 1
-NUM_LAYER = 28
+NUM_LAYER = 2
 MULTIPLE_OF = 256
 
 model = dict(
@@ -18,7 +18,7 @@ model = dict(
     embed_split_hidden=True,
     vocab_size=VOCAB_SIZE,
     embed_grad_scale=1,
-    parallel_output=True,
+    parallel_output=False,
     hidden_size=HIDDEN_SIZE,
     num_layers=NUM_LAYER,
     qkv_bias=True,
@@ -36,6 +36,7 @@ model = dict(
     ),
     multiple_of=MULTIPLE_OF,
     intermediate_size=18944,
+    use_flash_attn=False,
 )
 
 hybrid_zero_optimizer = dict(
@@ -49,7 +50,7 @@ hybrid_zero_optimizer = dict(
 )
 
 parallel = dict(
-    zero1=dict(size=8, fsdp=False),
+    zero1=dict(size=2, fsdp=False),
     tensor=dict(size=1, mode="mtp"),
     pipeline=dict(size=1, interleaved_overlap=True),
     weight=dict(size=1, overlap=False, memory_pool=False),
@@ -68,7 +69,7 @@ MICRO_BSZ = 1
 SEQ_LEN = 4096
 TOTAL_STEP = 75000
 PACK_SAMPLE_INTO_ONE = False
-USE_PACKED_DATASET = True
+USE_PACKED_DATASET = False
 SAVED_DATA_PATH = ""
 
 SAVE_CKPT_FOLDER = None
