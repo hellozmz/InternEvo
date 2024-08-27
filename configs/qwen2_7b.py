@@ -7,7 +7,7 @@ HIDDEN_SIZE = 3584
 NUM_ATTENTION_HEAD = 28
 NUM_KV_ATTENTION_HEAD = 4
 MLP_RATIO = 1
-NUM_LAYER = 28
+NUM_LAYER = 2
 MULTIPLE_OF = 256
 
 model = dict(
@@ -49,7 +49,7 @@ hybrid_zero_optimizer = dict(
 )
 
 parallel = dict(
-    zero1=dict(size=8, fsdp=False),
+    zero1=dict(size=2, fsdp=False),
     tensor=dict(size=1, mode="mtp"),
     pipeline=dict(size=1, interleaved_overlap=True),
     weight=dict(size=1, overlap=False, memory_pool=False),
