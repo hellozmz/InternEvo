@@ -503,9 +503,9 @@ def initialize_llm_profile(profiling: bool = False, start_time: str = None):
                 activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
                 schedule=torch.profiler.schedule(**schedule_config),
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(trace_path),
-                with_stack=True,
-                with_modules=True,
-                profile_memory=True,
+                with_stack=False,
+                with_modules=False,
+                profile_memory=False,
             )
             logger.info(f"Do profiling for GPU on rank {gpc.get_global_rank()}!")
     else:

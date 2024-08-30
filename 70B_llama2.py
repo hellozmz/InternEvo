@@ -1,14 +1,14 @@
-JOB_NAME = "7b_llama2_train"
+JOB_NAME = "70b_llama2_train"
 model_type = "LLAMA2"
 DO_ALERT = False
-
+VOCAB_FILE = "/mnt/zhumingzhu/InternEvo/70B/tokenizer.model" # SH
 VOCAB_SIZE = 32000
-SEQ_LEN = 2048
-HIDDEN_SIZE = 4096
-NUM_ATTENTION_HEAD = 32
-NUM_KV_ATTENTION_HEAD = 32
-MLP_RATIO = 2.6875
-NUM_LAYER = 32
+SEQ_LEN = 4096 # 32768 # 262144
+HIDDEN_SIZE = 8192
+NUM_ATTENTION_HEAD = 64
+NUM_KV_ATTENTION_HEAD = 8
+MLP_RATIO = 3.5
+NUM_LAYER = 4
 
 
 MODEL_ONLY_FOLDER = "local:llm_ckpts/xxxx"
@@ -22,7 +22,7 @@ LOAD_CKPT_FOLDER = "local:llm_ckpts/49"
 # BOTO3_IP = os.environ["BOTO3_IP"] # boto3 bucket endpoint
 # SAVE_CKPT_FOLDER = f"boto3:s3://model_weights.{BOTO3_IP}/internlm"
 # LOAD_CKPT_FOLDER = f"boto3:s3://model_weights.{BOTO3_IP}/internlm/snapshot/1/"
-CHECKPOINT_EVERY = 50
+CHECKPOINT_EVERY = 500000
 ckpt = dict(
     enable_save_ckpt=False,  # enable ckpt save.
     save_ckpt_folder=SAVE_CKPT_FOLDER,  # Path to save training ckpt.
@@ -41,11 +41,12 @@ ckpt = dict(
 )
 
 TRAIN_FOLDER = None
+# TRAIN_FOLDER = "/private/deepl/RedPajama-Data/RedPajama_text_document"
 VALID_FOLDER = None  # "/path/to/dataset"
 data = dict(
     seq_len=SEQ_LEN,
     # micro_num means the number of micro_batch contained in one gradient update
-    micro_num=4,
+    micro_num=256,
     # packed_length = micro_bsz * SEQ_LEN
     micro_bsz=1,
     # defaults to the value of micro_num
@@ -53,7 +54,7 @@ data = dict(
     # defaults to 0, means disable evaluate
     valid_every=0,
     pack_sample_into_one=False,
-    total_steps=20,
+    total_steps=10,
     skip_batches="",
     # rampup_batch_size (str): A string with three space-separated integers representing the
     #       starting batch size, the increment, and the number of steps between
@@ -109,6 +110,7 @@ adam = dict(
     adam_beta2_c=0,
     adam_eps=1e-8,
     weight_decay=0.01,
+    fused=True
 )
 
 lr_scheduler = dict(
@@ -139,19 +141,11 @@ model = dict(
     no_bias=True,
     mlp_ratio=MLP_RATIO,
     apply_post_layer_norm=False,
-    dtype="torch.bfloat16",
+    dtype="torch.float16",
     norm_type="rmsnorm",
     layer_norm_epsilon=1e-5,
     num_kv_attention_heads=NUM_KV_ATTENTION_HEAD,
     use_flash_attn=True,
-    # Whether the odd and even columns of the query and key in the model are normally interleaved.
-    # If it's True, the model's odd and even columns are normally ordered; if it's False,
-    # it means that the model has prematurely concatenated all odd columns and even columns in front
-    # and back, in order to improve the RoPE's computational efficiency.
-    # Example:
-    # qk_interleaved = True: q[-1] = [q1,q2,q3,q4,q5,q6,...], k[-1] = [k1,k2,k3,k4,k5,k6,...]
-    # qk_interleaved = False: q[-1] = [q1,q3,q5,...,q2,q4,q6,...], k[-1] = [k1,k3,k5,...,k2,k4,k6,...]
-    qk_interleaved=False,
 )
 
 """
@@ -184,6 +178,7 @@ parallel = dict(
     tensor=dict(size=4, mode="mtp"),
     pipeline=dict(size=2, interleaved_overlap=True),
     weight=dict(size=1, overlap=True, memory_pool=True),
+    sequence_parallel=True, # SH
 )
 
 cudnn_deterministic = False

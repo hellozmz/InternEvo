@@ -328,7 +328,7 @@ class TrainerBuilder(Trainer):
                 if self.memory_profiler is not None:
                     self.memory_profiler.step()
 
-                if batch_count % 2 == 0:
+                if batch_count % 1 == 0:
                     prof.step()
 
                 # internlm_accelerator.memory._dump_snapshot(f"my_snapshot_{gpc.get_global_rank()}.pickle")
