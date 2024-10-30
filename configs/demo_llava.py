@@ -3,11 +3,11 @@ model_type = "LLAVA"
 DO_ALERT = False
 
 VOCAB_SIZE = 32000
-SEQ_LEN = 2048
+SEQ_LEN = 4096
 HIDDEN_SIZE = 4096
 NUM_ATTENTION_HEAD = 32
 NUM_KV_ATTENTION_HEAD = 8
-MLP_RATIO = 3.5
+MLP_RATIO = 2.6875
 NUM_LAYER = 32
 
 
@@ -22,7 +22,7 @@ LOAD_CKPT_FOLDER = "local:llm_ckpts/49"
 # BOTO3_IP = os.environ["BOTO3_IP"] # boto3 bucket endpoint
 # SAVE_CKPT_FOLDER = f"boto3:s3://model_weights.{BOTO3_IP}/internlm"
 # LOAD_CKPT_FOLDER = f"boto3:s3://model_weights.{BOTO3_IP}/internlm/snapshot/1/"
-CHECKPOINT_EVERY = 50
+CHECKPOINT_EVERY = 500
 ckpt = dict(
     enable_save_ckpt=False,  # enable ckpt save.
     save_ckpt_folder=SAVE_CKPT_FOLDER,  # Path to save training ckpt.
@@ -40,9 +40,14 @@ ckpt = dict(
     oss_snapshot_freq=int(CHECKPOINT_EVERY / 2),  # snapshot ckpt save frequency.
 )
 
-TRAIN_FOLDER = None
+TRAIN_FOLDER = '/deeplink_afs/zhumingzhu/data/1027/ids'
+# TRAIN_FOLDER = None
 VALID_FOLDER = None  # "/path/to/dataset"
 data = dict(
+    content_name="conversations",
+    image_folder="/deeplink_afs/zhumingzhu/data/1027/LLaVA-Pretrain/images",
+    type="streaming",
+    tokenizer_path="/deeplink_afs/zhumingzhu/data/1027/vicuna-13b-v1.5",
     is_multimodal=True,
     seq_len=SEQ_LEN,
     # micro_num means the number of micro_batch contained in one gradient update
@@ -54,7 +59,7 @@ data = dict(
     # defaults to 0, means disable evaluate
     valid_every=0,
     pack_sample_into_one=False,
-    total_steps=200,
+    total_steps=500,
     skip_batches="",
     # rampup_batch_size (str): A string with three space-separated integers representing the
     #       starting batch size, the increment, and the number of steps between
@@ -111,13 +116,13 @@ adam = dict(
     adam_beta2=0.95,
     adam_beta2_c=0,
     adam_eps=1e-8,
-    weight_decay=0.01,
+    weight_decay=0.0,
 )
 
 lr_scheduler = dict(
     total_steps=data["total_steps"],
     init_steps=0,  # optimizer_warmup_step
-    warmup_ratio=0.01,
+    warmup_ratio=0.03,
     eta_min=1e-5,
     last_epoch=-1,
 )

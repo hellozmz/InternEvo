@@ -31,9 +31,11 @@ class StreamingDataset(Dataset):
         buffer_size=1024,
     ):
         self.dataset = datasets.load_dataset(train_folder, data_dir=subset_name, split=split, streaming=True)
+        self.origin_len = sum(1 for _ in self.dataset)
         self.dataset = split_dataset_by_node(
             self.dataset, rank=gpc.get_local_rank(ParallelMode.DATA), world_size=gpc.get_world_size(ParallelMode.DATA)
         )
+        self.len = sum(1 for _ in self.dataset)
         self.content_name = content_name
         self.buffer_size = buffer_size
         self.image_folder = image_folder
@@ -41,14 +43,18 @@ class StreamingDataset(Dataset):
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         self.tokenizer.model_max_length = model_max_length
+        print(f"============== self.origin_len len = {( self.origin_len)} ==============", flush=True)
+        print(f"============== self.len len = {( self.len)} ==============", flush=True)
 
     def __iter__(self):
         buffer = []
         for sample in self.dataset:
-            buffer.append(sample)
-            if len(buffer) >= self.buffer_size:
-                yield from self._tokenize(buffer)
-                buffer = []
+            # 增加重复次数
+            for _ in range(1000):
+                buffer.append(sample)
+                if len(buffer) >= self.buffer_size:
+                    yield from self._tokenize(buffer)
+                    buffer = []
 
         if buffer:
             yield from self._tokenize(buffer)
