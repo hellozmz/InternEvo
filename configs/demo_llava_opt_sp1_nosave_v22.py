@@ -3,7 +3,7 @@ model_type = "LLAVA"
 DO_ALERT = False
 
 VOCAB_SIZE = 32000
-SEQ_LEN = 4096
+SEQ_LEN = 2048
 HIDDEN_SIZE = 4096
 NUM_ATTENTION_HEAD = 32
 NUM_KV_ATTENTION_HEAD = 32
@@ -14,7 +14,7 @@ NUM_LAYER = 32
 MODEL_ONLY_FOLDER = "local:llm_ckpts/xxxx"
 # Ckpt folder format:
 # fs: 'local:/mnt/nfs/XXX'
-SAVE_CKPT_FOLDER = "local:llm_ckpts"
+SAVE_CKPT_FOLDER = "local:/deeplink_afs/zhumingzhu/work/InternEvo/checkpoints"
 LOAD_CKPT_FOLDER = "local:llm_ckpts/49"
 
 # boto3 Ckpt folder format:
@@ -22,7 +22,7 @@ LOAD_CKPT_FOLDER = "local:llm_ckpts/49"
 # BOTO3_IP = os.environ["BOTO3_IP"] # boto3 bucket endpoint
 # SAVE_CKPT_FOLDER = f"boto3:s3://model_weights.{BOTO3_IP}/internlm"
 # LOAD_CKPT_FOLDER = f"boto3:s3://model_weights.{BOTO3_IP}/internlm/snapshot/1/"
-CHECKPOINT_EVERY = 500
+CHECKPOINT_EVERY = 500000000000
 ckpt = dict(
     enable_save_ckpt=False,  # enable ckpt save.
     save_ckpt_folder=SAVE_CKPT_FOLDER,  # Path to save training ckpt.
@@ -51,7 +51,7 @@ data = dict(
     is_multimodal=True,
     seq_len=SEQ_LEN,
     # micro_num means the number of micro_batch contained in one gradient update
-    micro_num=4,
+    micro_num=8,
     packed_length=SEQ_LEN,
     micro_bsz=1,
     # defaults to the value of micro_num
@@ -59,8 +59,9 @@ data = dict(
     # defaults to 0, means disable evaluate
     valid_every=0,
     pack_sample_into_one=False,
-    total_steps=500,
+    total_steps=100,
     skip_batches="",
+    use_packed_dataset=True,
     # rampup_batch_size (str): A string with three space-separated integers representing the
     #       starting batch size, the increment, and the number of steps between
     #       each increment. For example, "192 24 8" means that the batch size (micro_num)
