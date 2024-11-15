@@ -892,7 +892,11 @@ class SelfAttention(nn.Module):
         self.softmax_scale = softmax_scale
         self.dropout = nn.Dropout(attention_dropout)
         self.layer_idx = layer_idx
-
+        self.cu_seqlens_q = torch.tensor([0, 2048])
+        self.cu_seqlens_k = torch.tensor([0, 2048])
+        self.max_seqlen_q = 2048
+        self.max_seqlen_k = 2048
+        
         if device_backend == AcceleratorType.NPU:
             assert self.causal, "Ascend flash attention does not spport causal=False yet!"
 
@@ -1008,9 +1012,14 @@ class SelfAttention(nn.Module):
 
         dropout = self.dropout if attn_type is AttnType.Torch else self.dropout.p
         extra_args = (key_padding_mask) if attn_type is AttnType.Torch else ()
+        if self.cu_seqlens_q.device != cu_seqlens_q.device:
+            self.cu_seqlens_q = self.cu_seqlens_q.to(cu_seqlens_q.device)
+        if self.cu_seqlens_k.device != cu_seqlens_k.device:
+            self.cu_seqlens_k = self.cu_seqlens_k.to(cu_seqlens_k.device)
 
+        # print(f"caikun debug {cu_seqlens_q=} {cu_seqlens_k=} {q.shape=} {kv.shape=} {max_seqlen_q=} {max_seqlen_k=} {self.cu_seqlens_q=} {self.cu_seqlens_k=} {self.max_seqlen_q=} {self.max_seqlen_k=}", flush=True)
         return op(
-            q, kv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, dropout, softmax_scale, causal, *extra_args
+            q, kv, self.cu_seqlens_q, self.cu_seqlens_k, self.max_seqlen_q, self.max_seqlen_k, dropout, softmax_scale, causal, *extra_args
         )
 
     @forward.register(conditions=(str(QKVPackType.QKVSPLITED), str(CuSeqlenType.With)))

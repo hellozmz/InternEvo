@@ -629,11 +629,11 @@ def initialize_llm_profile(profiling: bool = False, start_time: str = None):
                 activities=[torch_npu.profiler.ProfilerActivity.CPU, torch_npu.profiler.ProfilerActivity.NPU],
                 schedule=torch_npu.profiler.schedule(**schedule_config),
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(trace_path),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=False,
+                record_shapes=False,
+                profile_memory=False,
+                with_stack=True,
                 with_flops=False,
-                with_modules=False,
+                with_modules=True,
                 experimental_config=experimental_config,
             )
             logger.info(f"Do profiling for NPU on rank {gpc.get_global_rank()}!")

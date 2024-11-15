@@ -236,7 +236,9 @@ def get_megatron_flops(
 
 
 def enable_pytorch_expandable_segments():
-    if torch.__version__ >= "2.1.0" and AcceleratorType.GPU == internlm_accelerator.get_accelerator_backend():
+    # if torch.__version__ >= "2.1.0" and internlm_accelerator.get_accelerator_backend() in [AcceleratorType.GPU, AcceleratorType.NPU]:
+    if torch.__version__ >= "2.1.0" and internlm_accelerator.get_accelerator_backend() in [AcceleratorType.GPU]:
+        print(f"============enable_pytorch_expandable_segments================{enable_pytorch_expandable_segments}", flush=True)
         _expandable_segments_conf = "expandable_segments:True"
         _alloc_conf = os.getenv("PYTORCH_CUDA_ALLOC_CONF", None)
         if _alloc_conf is None:
@@ -244,6 +246,13 @@ def enable_pytorch_expandable_segments():
         elif "max_split_size_mb" not in _alloc_conf:
             _alloc_conf = _alloc_conf + "," + _expandable_segments_conf
 
+        # if internlm_accelerator.get_accelerator_backend() == AcceleratorType.NPU:
+        #     import torch_npu
+        #     # torch_npu.npu.memory._set_allocator_settings(_alloc_conf)
+        #     from torch_npu.contrib import transfer_to_npu
+        #     print(f"============_alloc_conf================{_alloc_conf}", flush=True)
+        #     torch.cuda.memory._set_allocator_settings(_alloc_conf)
+        # else:
         internlm_accelerator.memory._set_allocator_settings(_alloc_conf)
     else:
         logger.warning("To support the 'expandable_segments' configuration, please upgrade torch to version 2.1.0.")

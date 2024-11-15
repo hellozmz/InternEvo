@@ -136,6 +136,10 @@ class TrainerBuilder(Trainer):
         # initialize batch skipper
         self.batch_skipper = self._initialize_batch_skipper(train_state)
 
+        
+        print(f"000+++++++++++++++++model+++++++++++++++++", flush=True)
+        print(model, flush=True)
+        print(f"000+++++++++++++++++model+++++++++++++++++", flush=True)
         # initialize trainer
         engine, scheduler = initialize_trainer(
             model=model,
@@ -379,5 +383,5 @@ class TrainerBuilder(Trainer):
     def _update_profilers(self, batch_count: int, prof):
         if self.memory_profiler is not None:
             self.memory_profiler.step()
-        if batch_count % 2 == 0:
+        if batch_count % 1 == 0:
             prof.step()

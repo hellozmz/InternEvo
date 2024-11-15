@@ -37,6 +37,17 @@ internlm_accelerator = get_accelerator()
 custom_bwd = internlm_accelerator.return_custom_bwd()
 custom_fwd = internlm_accelerator.return_custom_fwd()
 
+class _Cache:
+    cached_params = {}
+    
+    @classmethod
+    def put(cls, key, value):
+        cls.cached_params[key] = value
+    
+    @classmethod
+    def get(cls, key):
+        return cls.cached_params.get(key, None)
+    
 
 # adpated from https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/ops/fused_dense.py
 class SPFusedDenseFunc(torch.autograd.Function):
@@ -130,30 +141,48 @@ class SPFusedDenseFunc(torch.autograd.Function):
             grad_input, handle_grad_input = communicator.grad_input_hook(grad_input, async_op=True)
         else:
             grad_input = None
+            if _Cache.get(weight.shape) is None:
+                _Cache.put(weight.shape, torch.zeros_like(weight))
+            if _Cache.get(bias.shape) is None:
+                _Cache.put(bias.shape, torch.zeros_like(bias))
+            return grad_input, _Cache.get(weight.shape), _Cache.get(bias.shape), None, None, None, None, None
 
         # computes gradinets for weight and bias if necessary
-        if ctx.needs_input_grad[1]:
-            assert ctx.compute_weight_gradient
+        if not hasattr(weight, 'sss') or weight.sss:
+            if ctx.needs_input_grad[1]:
+                assert ctx.compute_weight_gradient
 
-            # wait for x has been gathered
-            handle_x.wait()
+                # wait for x has been gathered
+                handle_x.wait()
 
-            x = x.reshape(batch_dim, x.shape[-1])
-            if (
-                gpc.is_using_parallel_mode(ParallelMode.PIPELINE)
-                and gpc.config.parallel["pipeline"].get("zero_bubble", False)
-                and not gpc.is_first_rank(ParallelMode.PIPELINE)
-            ):
-                from internlm.core.scheduler.pipeline_scheduler import WeightGradStore
+                x = x.reshape(batch_dim, x.shape[-1])
+                if (
+                    gpc.is_using_parallel_mode(ParallelMode.PIPELINE)
+                    and gpc.config.parallel["pipeline"].get("zero_bubble", False)
+                    and not gpc.is_first_rank(ParallelMode.PIPELINE)
+                ):
+                    from internlm.core.scheduler.pipeline_scheduler import WeightGradStore
 
-                WeightGradStore.put(weight, bias, x, grad_output, ctx.needs_input_grad[2], linear_backward_op)
-                grad_weight, grad_bias = None, None
+                    WeightGradStore.put(weight, bias, x, grad_output, ctx.needs_input_grad[2], linear_backward_op)
+                    grad_weight, grad_bias = None, None
+                else:
+                    grad_weight, grad_bias = linear_backward_op(x, grad_output, ctx.needs_input_grad[2])
+
             else:
-                grad_weight, grad_bias = linear_backward_op(x, grad_output, ctx.needs_input_grad[2])
-
+                grad_weight = None
+                grad_bias = grad_output if ctx.needs_input_grad[2] else None
+                if _Cache.get(weight.shape) is None:
+                    _Cache.put(weight.shape, torch.zeros_like(weight))
+                return grad_input, _Cache.get(weight.shape), grad_bias, None, None, None, None, None
         else:
-            grad_weight = None
-            grad_bias = grad_output if ctx.needs_input_grad[2] else None
+            if _Cache.get(weight.shape) is None:
+                _Cache.put(weight.shape, torch.zeros_like(weight))
+            if bias is None:
+                return grad_input, _Cache.get(weight.shape), None, None, None, None, None, None
+            else:
+                if _Cache.get(bias.shape) is None:
+                    _Cache.put(bias.shape, torch.zeros_like(bias))
+                return grad_input, _Cache.get(weight.shape), _Cache.get(bias.shape), None, None, None, None, None
 
         # wait for grad_input has been gathered
         handle_grad_input.wait()

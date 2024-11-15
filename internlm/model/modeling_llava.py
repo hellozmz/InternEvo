@@ -16,6 +16,7 @@ from internlm.model.modules.linear import new_linear
 from internlm.model.modules.norm import new_layer_norm
 from internlm.utils.logger import get_logger
 from internlm.utils.common import get_current_device
+from internlm.utils.frozen_manager import FrozenManager
 
 logger = get_logger(__file__)
 
@@ -185,11 +186,26 @@ class Llava(BaseModel):
             self.vision_proj = build_vision_projector(vision_proj_cfg)
             # self.vision_proj.requires_grad_(False)
 
+    def _get_meta(self, data):
+        if data is None:
+            return None
+        return data.shape, data.dtype, data.stride()
+
     def forward(self, hidden_states=None, images=None, input_ids=None, **kwargs):
         xs = []
         pure_text = False
         images = [] if images is None else images
 
+        # print(f"********************", flush=True)
+        # print(f"caikun debug modeling_llava.py:forward {self._get_meta(hidden_states)=} {self._get_meta(input_ids)=} {len(images)=}", flush=True)
+        # if len(images) > 0:
+        #     for image in images:
+        #         if isinstance(image, torch.Tensor):
+        #             print(f"{self._get_meta(image)}", flush=True)
+        #         else:
+        #             print(f"{type(image)=}", flush=True)
+        # print(f"********************", flush=True)
+        
         if hasattr(self, "vit") and hasattr(self, "vision_proj") and hasattr(self, "tok_embeddings"):
             # vit
             if len(images) == 1 and len(images[0]) == 0:  # make sure grad in Qformer for update
@@ -225,8 +241,28 @@ class Llava(BaseModel):
                     self.embed_grad_scale * hidden_states + (1 - self.embed_grad_scale) * hidden_states.detach()
                 )
 
-        for _, block in enumerate(self.layers):
-            hidden_states = block(hidden_states, residual=None, **kwargs)
+        import random
+        targets = [0, 1, 2, 3, 4, 5, 6, 7]
+        # random.seed(42)
+        FrozenManager.clear_cached_wp_parameters()
+        for idx, block in enumerate(self.layers):
+            random_number = random.randint(0, 31)
+            if random_number < 6:
+                continue
+            
+            if idx in targets:
+                block.feed_forward.w1.weight.sss = False
+                block.feed_forward.w2.weight.sss = False
+                block.feed_forward.w3.weight.sss = False
+                hidden_states = block(hidden_states, residual=None, **kwargs)
+                # block.train(mode=False)
+                # with torch.no_grad():
+                    # hidden_states = block(hidden_states, residual=None, **kwargs)
+                # block.train(mode=True)
+                # for p in block.parameters():
+                    # FrozenManager.cache_full_wp_parameters(p, p)
+            else:
+                hidden_states = block(hidden_states, residual=None, **kwargs)
 
         if hasattr(self, "norm"):
             hidden_states = self.norm(hidden_states.float())
