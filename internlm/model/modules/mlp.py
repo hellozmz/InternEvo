@@ -105,9 +105,9 @@ class FeedForward(nn.Module):
             self.w3 = new_linear(
                 "w3", in_features, hidden_features, bias, device=device, dtype=dtype, is_expert=is_expert
             )
-            self.w1.weight.sss = True
-            self.w2.weight.sss = True
-            self.w3.weight.sss = True
+            # self.w1.weight.sss = True
+            # self.w2.weight.sss = True
+            # self.w3.weight.sss = True
 
     def forward(self, x):
         if not self.mlp_layer_fusion:

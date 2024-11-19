@@ -242,13 +242,13 @@ class Llava(BaseModel):
                 )
 
         import random
-        targets = [0, 1, 2, 3, 4, 5, 6, 7]
+        targets = []
         # random.seed(42)
-        FrozenManager.clear_cached_wp_parameters()
+        # FrozenManager.clear_cached_wp_parameters()
         for idx, block in enumerate(self.layers):
-            random_number = random.randint(0, 31)
-            if random_number < 6:
-                continue
+            # random_number = random.randint(0, 31)
+            # if random_number < 6:
+            #     continue
             
             if idx in targets:
                 block.feed_forward.w1.weight.sss = False
