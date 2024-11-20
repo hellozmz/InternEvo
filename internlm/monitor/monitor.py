@@ -180,7 +180,6 @@ class MonitorManager(metaclass=SingletonMeta):
         self.last_step_loss = -1
         self.alert_file_path = None
         self.enable_alert = False
-        self.light_monitor_address = None
         self.alert_address = None
 
     def monitor_loss_spike(self, alert_address: str = None, step_count: int = 0, cur_step_loss: float = 0.0):
@@ -279,7 +278,6 @@ class MonitorManager(metaclass=SingletonMeta):
         self.alert_address = alert_address
 
         if self.enable_alert:
-            self.light_monitor_address = gpc.config.monitor.alert.get("light_monitor_address", None)
             # initialize alert file
             self.alert_file_path = gpc.config.monitor.alert.get("alert_file_path")
             if self.alert_file_path and gpc.is_rank_for_log():
