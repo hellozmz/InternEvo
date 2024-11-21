@@ -205,7 +205,6 @@ monitor = dict(
     alert=dict(
         enable_feishu_alert=DO_ALERT,
         feishu_alert_address='https://open.feishu.cn/open-apis/bot/v2/hook/4af0c4d0-ecf2-4749-9194-57a15e391683',  # feishu webhook to send alert message
-        light_monitor_address=None,  # light_monitor address to send heartbeat
         alert_file_path=f"llm_alter/{JOB_NAME}_alert.log",
     ),
     tensorboard=dict(
