@@ -29,6 +29,7 @@ def internevo_monitor(feishu_alert=True, clean_run=True):
                 with initialize_monitor_manager(
                     job_name=gpc.config.JOB_NAME, alert_address=gpc.config.monitor.alert.feishu_alert_address
                 ):
+                    # print(f"=============feishu_alert_address=============gpc.config.JOB_NAME {gpc.config.JOB_NAME}", flush=True)
                     return execute_with_exception_handling(func, *args, **kwargs)
             else:
                 return execute_with_exception_handling(func, *args, **kwargs)
@@ -107,7 +108,7 @@ class MonitorTracker(Thread):
         while not self.stopped:
             try:
                 self._check_stuck()
-                self._check_loss_spike()
+                # self._check_loss_spike()
             except Exception:
                 continue
             time.sleep(self.check_interval)
@@ -235,6 +236,18 @@ class MonitorManager(metaclass=SingletonMeta):
             else:
                 send_alert_message(alert_address, message)
 
+    def send_signal_resume(self):
+        host = 'localhost'
+        port = 55555
+        message = 'restart'
+
+        # 创建一个 socket 对象
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # 连接到服务器
+            s.connect((host, port))
+            # 发送消息
+            s.sendall(message.encode())
+
     def handle_sigterm(self, alert_address: str = None):
         """Catch SIGTERM signal, and send alert message to Feishu."""
 
@@ -247,6 +260,7 @@ class MonitorManager(metaclass=SingletonMeta):
                     address=alert_address,
                     message=message,
                 )
+                self.send_signal_resume()
 
         signal.signal(signal.SIGTERM, sigterm_handler)
 

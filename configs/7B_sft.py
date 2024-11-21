@@ -1,27 +1,27 @@
 JOB_NAME = "7b_train"
-DO_ALERT = False
+DO_ALERT = True
 
 SEQ_LEN = 2048
 HIDDEN_SIZE = 4096
 NUM_ATTENTION_HEAD = 32
 MLP_RATIO = 8 / 3
-NUM_LAYER = 32
+NUM_LAYER = 2
 VOCAB_SIZE = 103168
 
 MODEL_ONLY_FOLDER = "local:llm_ckpts/xxxx"
 # Ckpt folder format:
 # fs: 'local:/mnt/nfs/XXX'
-SAVE_CKPT_FOLDER = "local:llm_ckpts"
-LOAD_CKPT_FOLDER = "local:llm_ckpts/49"
+SAVE_CKPT_FOLDER = "local:llm_ckpts/"
+LOAD_CKPT_FOLDER = "local:llm_ckpts/"
 
 # boto3 Ckpt folder format:
 # import os
 # BOTO3_IP = os.environ["BOTO3_IP"] # boto3 bucket endpoint
 # SAVE_CKPT_FOLDER = f"boto3:s3://model_weights.{BOTO3_IP}/internlm"
 # LOAD_CKPT_FOLDER = f"boto3:s3://model_weights.{BOTO3_IP}/internlm/snapshot/1/"
-CHECKPOINT_EVERY = 50
+CHECKPOINT_EVERY = 5
 ckpt = dict(
-    enable_save_ckpt=False,  # enable ckpt save.
+    enable_save_ckpt=True,  # enable ckpt save.
     enable_internevo2hf_ckpt=False,  # enable ckpt save for huggingface format.
     save_ckpt_folder=SAVE_CKPT_FOLDER,  # Path to save training ckpt.
     # load_ckpt_folder= dict(path=MODEL_ONLY_FOLDER, content=["model"], ckpt_type="normal"),
@@ -59,7 +59,7 @@ data = dict(
     # defaults to 0, means disable evaluate
     valid_every=50,
     pack_sample_into_one=False,
-    total_steps=50000,
+    total_steps=1000,
     skip_batches="",
     # rampup_batch_size (str): A string with three space-separated integers representing the
     #       starting batch size, the increment, and the number of steps between
@@ -204,7 +204,7 @@ monitor = dict(
     # feishu alert configs
     alert=dict(
         enable_feishu_alert=DO_ALERT,
-        feishu_alert_address=None,  # feishu webhook to send alert message
+        feishu_alert_address='https://open.feishu.cn/open-apis/bot/v2/hook/4af0c4d0-ecf2-4749-9194-57a15e391683',  # feishu webhook to send alert message
         light_monitor_address=None,  # light_monitor address to send heartbeat
         alert_file_path=f"llm_alter/{JOB_NAME}_alert.log",
     ),

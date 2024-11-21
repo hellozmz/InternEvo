@@ -11,6 +11,7 @@ from internlm.initialize import initialize_distributed_env
 from internlm.model.builder import create_model
 from internlm.monitor import internevo_monitor
 from internlm.utils.common import parse_args
+from torch_npu.contrib import transfer_to_npu
 
 
 @internevo_monitor(feishu_alert=True, clean_run=True)
