@@ -115,6 +115,19 @@ class MonitorTracker(Thread):
                 continue
             time.sleep(self.check_interval)
 
+    def send_signal_resume(self):
+        host = 'localhost'
+        port = 60006
+        message = 'restart'
+        print(f"====================send_signal_resume====================", flush=True)
+
+        # 创建一个 socket 对象
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # 连接到服务器
+            s.connect((host, port))
+            # 发送消息
+            s.sendall(message.encode())
+
     def _check_stuck(self):
         """
         Check training status for potential stuck condition.
@@ -125,6 +138,7 @@ class MonitorTracker(Thread):
             new_active_time = os.getenv("LAST_ACTIVE_TIMESTAMP")
         if int(new_active_time) <= int(self.last_active_time) and new_active_time != -1:
             self._send_alert("Training may be in stuck status, please check it.")
+            self.send_signal_resume()
         self.last_active_time = new_active_time
 
     def _check_loss_spike(self):
@@ -217,6 +231,7 @@ class MonitorManager(metaclass=SingletonMeta):
                 address=alert_address,
                 message=f"Failed to open ALERT file: {err}",
             )
+            self.send_signal_resume()
             return True
 
     def monitor_exception(self, alert_address: str = None, excp_info: str = None):
@@ -239,11 +254,13 @@ class MonitorManager(metaclass=SingletonMeta):
                     )
             else:
                 send_alert_message(alert_address, message)
+            self.send_signal_resume()
 
     def send_signal_resume(self):
         host = 'localhost'
-        port = 55555
+        port = 60006
         message = 'restart'
+        print(f"====================send_signal_resume====================", flush=True)
 
         # 创建一个 socket 对象
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -254,6 +271,36 @@ class MonitorManager(metaclass=SingletonMeta):
 
     def handle_sigterm(self, alert_address: str = None):
         """Catch SIGTERM signal, and send alert message to Feishu."""
+        
+        signals_to_catch = [
+            signal.SIGTERM,
+            # signal.SIGINT,
+            signal.SIGSEGV,
+            # signal.SIGHUP,
+            # signal.SIGQUIT,
+            # signal.SIGILL,
+            signal.SIGABRT,
+            signal.SIGFPE,
+            # signal.SIGUSR1,
+            # signal.SIGUSR2,
+            # signal.SIGPIPE,
+            # signal.SIGALRM,
+            # signal.SIGCHLD,
+            # signal.SIGCONT,
+            # signal.SIGSTOP,
+            # signal.SIGTSTP,
+            # signal.SIGTTIN,
+            # signal.SIGTTOU,
+            # signal.SIGBUS,
+            # signal.SIGPOLL,
+            # signal.SIGPROF,
+            # signal.SIGSYS,
+            # signal.SIGTRAP,
+            # signal.SIGURG,
+            # signal.SIGVTALRM,
+            # signal.SIGXCPU,
+            # signal.SIGXFSZ,
+        ]
 
         def sigterm_handler(sys_signal, frame):
             if self.enable_alert:
@@ -266,13 +313,21 @@ class MonitorManager(metaclass=SingletonMeta):
                 )
                 self.send_signal_resume()
 
-        signal.signal(signal.SIGTERM, sigterm_handler)
+        # signal.signal(signal.SIGTERM, sigterm_handler)
+        
+
+        for sig in signals_to_catch:
+            try:
+                signal.signal(sig, sigterm_handler)
+            except (OSError, RuntimeError, ValueError) as e:
+                self.send_signal_resume()
+                print(f"Cannot catch signal {sig}: {e}")
 
     def start_monitor(
         self,
         job_name: str,
         alert_address: str,
-        monitor_interval_seconds: int = 300,
+        monitor_interval_seconds: int = 125,
         loss_spike_limit: float = 1.5,
     ):
         """
